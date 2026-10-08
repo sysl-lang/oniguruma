@@ -1,0 +1,539 @@
+module sh.sysl.oniguruma
+
+import sh.sysl.oniguruma.c
+import sysl.slices.{as_mut_ptr, as_ptr}
+import sysl.text.{from_utf8, from_utf8_lossy, is_char_boundary}
+import sysl.buf.{Buf, buf}
+
+// Oniguruma regular expressions — the engine TextMate grammars are written for.
+//
+// **This is the third regex in the organisation, and the reason for it is the dialect.** A TextMate
+// grammar is a list of Oniguruma patterns: `\G`, `\h`, `(?<name>…)` beside numbered groups,
+// `\g<name>` subroutine calls, possessive quantifiers and absent groups. PCRE2 reads most of that
+// and reads some of it differently, so a highlighter driving a grammar through it is right about most
+// lines and quietly wrong about the rest. This binding is the real engine.
+//
+//     import sh.sysl.oniguruma.{compile, describe}
+//
+//     main() -> Result[unit, string]
+//         val re = compile("(?<word>\\w+)@(\\h+)").map_err(describe)?
+//
+//         re.find("ed@c0ffee").map_err(describe)? match
+//             Some(m) -> print(m.text(), m.group(1).unwrap(), m.group(2).unwrap())
+//             None -> print("no address")
+//
+// **Every offset is a BYTE offset into the UTF-8 string.** Oniguruma reads UTF-8 and answers in
+// bytes, and a sysl string is UTF-8, so nothing is converted: `s[m.start()..<m.end()]` is the match.
+// A caller holding UTF-16 positions (an editor) converts at its own edge.
+//
+// **The dialect is `ONIG_SYNTAX_ONIGURUMA` with `ONIG_OPTION_CAPTURE_GROUP`, and that is
+// vscode-oniguruma's default** — the binding every TextMate grammar in Visual Studio Code is run
+// through, so it is what a grammar's author tested against. `CAPTURE_GROUP` is the part that matters:
+// without it a pattern that names any group stops numbering its plain `(…)` groups, and a grammar's
+// `captures` table, which counts both, reads the wrong text. `\w`, `\d`, `\s`, `\b` and the POSIX
+// brackets are all Unicode under it; `Options` turns each to ASCII separately.
+//
+// **Oniguruma backtracks, so a pattern can be made to run for a very long time on a short subject.**
+// Every pattern this package compiles is searched under a retry budget (`Limits`), and an overrun is
+// `RetryLimit` rather than a highlighter that stops answering.
+//
+// **Not thread-safe to initialise**: the library is set up on the first compile, from whichever
+// thread gets there first. Compile once before handing patterns to other threads.
+
+// ## What can go wrong
+
+enum Error
+    // The pattern is not one, for the reason Oniguruma gives.
+    Pattern(message: string)
+
+    // One pattern of a scanner is not one: its index in the list, and Oniguruma's reason.
+    ScannerPattern(index: usize, message: string)
+
+    // The search used its whole backtracking budget. Both the pattern and the subject are legal;
+    // the combination is what costs. See `Limits`.
+    RetryLimit
+
+    // Oniguruma could not allocate.
+    OutOfMemory
+
+    // Anything else Oniguruma reports, by number and by its own sentence for it.
+    Other(code: i32, message: string)
+end Error
+
+describe(e: Error) -> string = e match
+    Pattern(message) -> message
+    ScannerPattern(index, message) -> s"pattern ${index}: ${message}"
+    RetryLimit -> "the search used its whole backtracking budget"
+    OutOfMemory -> "out of memory"
+    Other(code, message) -> s"${message} (${code})"
+
+// Oniguruma's own words for a code. A compile error that quotes part of the pattern — an undefined
+// group name — reads it out of the `ErrorInfo` `onig_new` filled in.
+private message_for(code: i32, info: *c.ErrorInfo) -> string
+    var b: [128]u8
+
+    val n = c.error_code_to_str(&b[0], code, info)
+
+    if n <= 0 then return s"Oniguruma error ${code}"
+
+    from_utf8_lossy(b[0..<usize(n)])
+end message_for
+
+private error_for(code: i32) -> Error =
+    if code == c.ERR_RETRY_LIMIT_IN_MATCH || code == c.ERR_RETRY_LIMIT_IN_SEARCH || code == c.ERR_SUBEXP_CALL_LIMIT then
+        RetryLimit
+    elif code == c.ERR_MEMORY then
+        OutOfMemory
+    else
+        Other(code, message_for(code, null))
+
+// ## Setting the library up
+
+private var initialized: bool = false
+
+private ensure_initialized()
+    if initialized then return
+
+    var encodings: [1]*c.Encoding = [c.utf8()]
+
+    c.initialize(&encodings[0], 1)
+    initialized = true
+end ensure_initialized
+
+// The linked library's version, `6.9.10` and the like.
+version() -> string
+    val p = c.version()
+    var n: usize = 0
+
+    while p[n] != u8(0)
+        n += 1
+
+    from_utf8_lossy(p[0..<n])
+end version
+
+// ## How a pattern is read
+
+struct Options
+    // Match without regard to case. `(?i)`.
+    icase: bool
+
+    // Ignore unescaped whitespace in the pattern and read `#` as a comment. `(?x)`.
+    extended: bool
+
+    // **`.` matches a newline.** This is Oniguruma's (and Ruby's) `multiline`, which is Perl's
+    // `/s`: `^` and `$` are line anchors whatever this says. `(?m)`.
+    dot_all: bool
+
+    // Number the plain `(…)` groups even where the pattern names some groups. On in `textmate()`.
+    capture_group: bool
+
+    // **`\w`, `\W`, `\b`, `\B` and `\p{Word}` read ASCII words only.** Oniguruma ties the four
+    // together: there is no setting in which `\w` is ASCII while `\b` is Unicode.
+    word_is_ascii: bool
+
+    // `\d`, `\D` and `\p{Digit}` read `0`–`9` only.
+    digit_is_ascii: bool
+
+    // `\s`, `\S` and `\p{Space}` read ASCII whitespace only.
+    space_is_ascii: bool
+
+    // The POSIX brackets and their `\p{…}` spellings read ASCII only.
+    posix_is_ascii: bool
+
+    // The option bits these ask for. Each name is the header's own, read through `c const`.
+    code(self) -> u32
+        var bits = c.OPTION_NONE
+
+        if self.icase then bits |= c.OPTION_IGNORECASE
+        if self.extended then bits |= c.OPTION_EXTEND
+        if self.dot_all then bits |= c.OPTION_MULTILINE
+        if self.capture_group then bits |= c.OPTION_CAPTURE_GROUP
+        if self.word_is_ascii then bits |= c.OPTION_WORD_IS_ASCII
+        if self.digit_is_ascii then bits |= c.OPTION_DIGIT_IS_ASCII
+        if self.space_is_ascii then bits |= c.OPTION_SPACE_IS_ASCII
+        if self.posix_is_ascii then bits |= c.OPTION_POSIX_IS_ASCII
+
+        bits
+    end code
+end Options
+
+// **What vscode-oniguruma compiles a grammar with**: `ONIG_OPTION_CAPTURE_GROUP` and nothing else.
+textmate() -> Options = Options(false, false, false, true, false, false, false, false)
+
+// Every class ASCII, the way a validator usually means `\w` and `\d`. `\b` goes ASCII with `\w`.
+ascii() -> Options = Options(false, false, false, true, true, true, true, true)
+
+// ## What a search runs under
+
+// The backtracking budget. **This is the answer to a backtracking engine's one real hazard**, and it
+// is set on every pattern this package compiles rather than offered as something to remember.
+struct Limits
+    // How many times one match attempt — one starting position — may backtrack.
+    retry_in_match: u64
+
+    // How many times one whole search — every starting position it tries — may backtrack. Zero is
+    // no limit.
+    retry_in_search: u64
+
+// **Ten million retries per starting position — Oniguruma's own default, and so vscode-oniguruma's
+// — and ten million per search, where Oniguruma sets no limit.** An attempt that runs out ends the
+// whole search at once, so `(a+)+b` against forty `a`s stops at its first position, in tens of
+// milliseconds, exactly where vscode-oniguruma stops it; vscode reports that as no match, this as
+// `RetryLimit`. The second limit catches what the first cannot: a subject where every position costs
+// a little under the first, which unbounded adds up to seconds over a long line.
+default_limits() -> Limits = Limits(10000000, 10000000)
+
+// ## A match
+
+// Where a match landed, and what its groups took — **byte offsets into the subject**, always on
+// character boundaries, so `s[a..<b]` takes one without a boundary check failing.
+//
+// A group that took no part in the match has no span rather than an empty one: `(a)|(b)` against
+// `"b"` leaves group 1 absent, while `(a*)b` against `"b"` gives group 1 an empty span.
+struct Match
+    src: string
+    slots: []int
+
+    // How many groups this match reports, group 0 — the whole match — included.
+    group_count(self) -> usize = self.slots.len / 2
+
+    span(self, i: usize) -> Option[(usize, usize)]
+        if i >= self.group_count() then return None
+
+        val lo = self.slots[i * 2]
+        val hi = self.slots[i * 2 + 1]
+
+        if lo < 0 || hi < 0 then None else Some((usize(lo), usize(hi)))
+    end span
+
+    group(self, i: usize) -> Option[string] = self.span(i) match
+        Some(s) -> Some(self.src[s.0..<s.1])
+        None -> None
+
+    // The whole match.
+    text(self) -> string = self.group(0).unwrap()
+
+    start(self) -> usize = usize(self.slots[0])
+
+    end(self) -> usize = usize(self.slots[1])
+end Match
+
+// The groups a region holds, read out before the region is reused or freed.
+private match_from(s: string, r: *c.Region) -> Match
+    val n = usize(r.num_regs)
+
+    var slots: []int = [-1; n * 2]
+
+    for i in 0..<n
+        slots[i * 2] = int(r.beg[i])
+        slots[i * 2 + 1] = int(r.end[i])
+
+    Match(s, slots)
+end match_from
+
+// ## The subject, as Oniguruma is handed it
+
+// Oniguruma takes a subject as a start and an end pointer, never a terminator. An empty string has
+// no storage to point into, so it is handed a byte of this frame's instead: `str == end`, and
+// nothing is read.
+private struct Subject
+    lo: *u8
+    hi: *u8
+
+    at(self, offset: usize) -> *u8 = ptr_cast(usize(self.lo) + offset)
+
+private subject_of(b: []const u8, spare: *u8) -> Subject
+    if b.len == 0 then return Subject(spare, spare)
+
+    val lo = as_ptr(b)
+
+    Subject(lo, ptr_cast(usize(lo) + b.len))
+end subject_of
+
+// The first character boundary at or after `at`, so a position inside a character never reaches
+// the engine.
+private boundary_from(b: []const u8, at: usize) -> usize
+    var k = at
+
+    while k < b.len && !is_char_boundary(b[k])
+        k += 1
+
+    k
+end boundary_from
+
+// The option bit that makes `\G` hold at the search's start or nowhere. **Oniguruma's `\G` is the
+// position a search begins at**, so a caller whose previous match ended somewhere else is asking for
+// a `\G` that holds at no position this search will try.
+private anchor_bits(from: usize, anchor: usize) -> u32 = if from == anchor then c.OPTION_NONE else c.OPTION_NOT_BEGIN_POSITION
+
+private new_param(limits: Limits) -> *c.MatchParam
+    val mp = c.new_match_param()
+
+    if mp == null then return null
+
+    c.initialize_match_param(mp)
+    c.set_retry_limit_in_match(mp, limits.retry_in_match)
+    c.set_retry_limit_in_search(mp, limits.retry_in_search)
+    mp
+end new_param
+
+// ## A compiled pattern
+
+// **The handle is storage Oniguruma allocated, and this is a `&Regex` with a destructor**, so the
+// pattern and its search budget are freed together when the last reference goes.
+struct Regex
+    pattern: string
+    private reg: *c.Pattern
+    private mp: *c.MatchParam
+
+    // How many capture groups the pattern has, not counting the whole match.
+    capture_count(&self) -> usize = usize(c.number_of_captures(self.reg))
+
+    // Every group number `(?<name>…)` gave `name`, in order — more than one where the pattern
+    // declared the name twice, none where it never did.
+    group_numbers(&self, name: string) -> Buf[usize]
+        var out: Buf[usize] = buf()
+        val b = name.bytes
+
+        if b.len == 0 then return out
+
+        var nums: *i32 = null
+        val lo = as_ptr(b)
+
+        val n = c.name_to_group_numbers(self.reg, lo, ptr_cast(usize(lo) + b.len), &nums)
+
+        for i in 0..<usize(if n > 0 then n else 0)
+            out.push(usize(nums[i]))
+
+        out
+    end group_numbers
+
+    // Whether the subject matches anywhere.
+    is_match(&self, s: string) -> Result[bool, Error] = self.find(s).map((m) -> m.is_some())
+
+    // The leftmost match, or nothing.
+    find(&self, s: string) -> Result[Option[Match], Error] = self.search(s, 0, 0)
+
+    // **The leftmost match starting at or after `from`**, with `\G` holding at `anchor` — which, as
+    // Oniguruma reads `\G`, is only possible where `anchor == from`. The position does not shorten
+    // the subject: `^`, `\A` and lookbehind still see everything before `from`.
+    search(&self, s: string, from: usize, anchor: usize) -> Result[Option[Match], Error]
+        val b = s.bytes
+
+        if from > b.len then return Ok(None)
+
+        var spare: [1]u8
+        val sub = subject_of(b, &spare[0])
+        val at = boundary_from(b, from)
+        val region = c.region_new()
+
+        if region == null then return Err(OutOfMemory)
+
+        val rc = c.search_with_param(self.reg, sub.lo, sub.hi, sub.at(at), sub.hi, region, anchor_bits(at, anchor), self.mp)
+        val out = answer(s, rc, region)
+
+        c.region_free(region, 1)
+        out
+    end search
+
+    // **A match starting at exactly `at`**, with `\G` holding at `anchor` where `anchor == at`.
+    // This is the anchored attempt a tokenizer makes when it wants to know whether a rule continues
+    // right where the last one stopped.
+    match_at(&self, s: string, at: usize, anchor: usize) -> Result[Option[Match], Error]
+        val b = s.bytes
+
+        // No match begins inside a character.
+        if at > b.len || (at < b.len && !is_char_boundary(b[at])) then return Ok(None)
+
+        var spare: [1]u8
+        val sub = subject_of(b, &spare[0])
+        val region = c.region_new()
+
+        if region == null then return Err(OutOfMemory)
+
+        val rc = c.match_with_param(self.reg, sub.lo, sub.hi, sub.at(at), region, anchor_bits(at, anchor), self.mp)
+        val out = answer(s, rc, region)
+
+        c.region_free(region, 1)
+        out
+    end match_at
+
+    // Every match, left to right and non-overlapping, each search's `\G` being where the previous
+    // match ended. After an **empty** match the next search starts one character on, so it cannot
+    // find the same empty match again — and so `\G` does not hold for it.
+    find_all(&self, s: string) -> Result[Buf[Match], Error]
+        var out: Buf[Match] = buf()
+        val b = s.bytes
+        var at: usize = 0
+        var prev: usize = 0
+
+        loop
+            if at > b.len then break
+
+            self.search(s, at, prev)? match
+                None -> break
+                Some(m) ->
+                    out.push(m)
+                    prev = m.end()
+
+                    // **Every round moves forward**, which is what makes this loop finish whatever
+                    // the engine answered.
+                    val past = if m.end() > m.start() then m.end() else boundary_from(b, m.end() + 1)
+
+                    at = if past > at then past else boundary_from(b, at + 1)
+
+        Ok(out)
+    end find_all
+end Regex
+
+// What a search or a match answered: a position (or a length) on success, `MISMATCH`, or an error.
+private answer(s: string, rc: i32, region: *c.Region) -> Result[Option[Match], Error] =
+    if rc == c.MISMATCH then
+        Ok(None)
+    elif rc < 0 then
+        Err(error_for(rc))
+    else
+        Ok(Some(match_from(s, region)))
+
+impl Drop for Regex
+    drop(self)
+        c.free(self.reg)
+        c.free_match_param(self.mp)
+    end drop
+
+// ## Compiling
+
+private compile_raw(pattern: string, o: Options) -> Result[*c.Pattern, string]
+    ensure_initialized()
+
+    val p = pattern.bytes
+
+    var spare: [1]u8
+    val sub = subject_of(p, &spare[0])
+    var reg: *c.Pattern = null
+    var info: c.ErrorInfo
+
+    val rc = c.new(&reg, sub.lo, sub.hi, o.code(), c.utf8(), c.oniguruma_syntax(), &info)
+
+    if rc != c.NORMAL then return Err(message_for(rc, &info))
+
+    Ok(reg)
+end compile_raw
+
+// A compiled pattern, read as `textmate()` reads it, or Oniguruma's reason it is not one.
+compile(pattern: string) -> Result[&Regex, Error] = compile_with(pattern, textmate(), default_limits())
+
+// The same, reading the pattern as `o` says and searching under `limits`.
+compile_with(pattern: string, o: Options, limits: Limits) -> Result[&Regex, Error]
+    val reg = compile_raw(pattern, o) match
+        Ok(r) -> r
+        Err(message) -> return Err(Pattern(message))
+
+    val mp = new_param(limits)
+
+    if mp == null
+        c.free(reg)
+        return Err(OutOfMemory)
+
+    Ok(Regex(pattern, reg, mp))
+end compile_with
+
+// ## A scanner — what a TextMate tokenizer asks
+
+// Which pattern of a scanner won, and its match.
+struct ScanMatch
+    index: usize
+    found: Match
+
+// **Several patterns searched as one** — a grammar rule's `begin`, `match` and `end` patterns, asked
+// "from here, where does the next one match, and which?" The answer is the leftmost position where
+// any pattern matches and, at that position, the lowest-numbered pattern that does: the rule
+// vscode-textmate and TextMate itself are written against.
+//
+// It is Oniguruma's `OnigRegSet` searched with `ONIG_REGSET_POSITION_LEAD`, which is exactly that
+// rule, in one pass over the subject rather than one per pattern. The set owns its compiled
+// patterns, so a scanner compiles its own rather than sharing a `Regex`'s.
+struct Scanner
+    private set: *c.RegSet
+    private params: Buf[*c.MatchParam]
+
+    // How many patterns the scanner holds.
+    size(&self) -> usize = self.params.len()
+
+    // The next match of any pattern at or after `start`, `\G` holding at `anchor` where
+    // `anchor == start` — pass the previous match's end as both on a tokenizer's ordinary step.
+    find_next(&self, s: string, start: usize, anchor: usize) -> Result[Option[ScanMatch], Error]
+        val b = s.bytes
+
+        if self.params.len() == 0 || start > b.len then return Ok(None)
+
+        var spare: [1]u8
+        val sub = subject_of(b, &spare[0])
+        val at = boundary_from(b, start)
+        var pos: i32 = 0
+
+        val rc = c.regset_search_with_param(self.set, sub.lo, sub.hi, sub.at(at), sub.hi, c.REGSET_POSITION_LEAD, anchor_bits(at, anchor), as_mut_ptr(self.params.view()), &pos)
+
+        if rc == c.MISMATCH then return Ok(None)
+
+        if rc < 0 then return Err(error_for(rc))
+
+        Ok(Some(ScanMatch(usize(rc), match_from(s, c.regset_get_region(self.set, rc)))))
+    end find_next
+end Scanner
+
+impl Drop for Scanner
+    drop(self)
+        c.regset_free(self.set)
+
+        for mp in self.params.view()
+            c.free_match_param(mp)
+    end drop
+
+// A scanner over `patterns`, read as `textmate()` reads them, or the first pattern that is not one
+// with its index.
+scanner(patterns: []const string) -> Result[&Scanner, Error] = scanner_with(patterns, textmate(), default_limits())
+
+scanner_with(patterns: []const string, o: Options, limits: Limits) -> Result[&Scanner, Error]
+    var regs: Buf[*c.Pattern] = buf()
+    var fault: Option[Error] = None
+
+    for i in 0..<patterns.len
+        if fault.is_none()
+            compile_raw(patterns[i], o) match
+                Ok(r) -> regs.push(r)
+                Err(message) -> fault = Some(ScannerPattern(i, message))
+
+    // **The patterns are freed one by one only while no set owns them.** Once `onig_regset_new` has
+    // taken them, the set's own free is the only one.
+    fault match
+        Some(e) ->
+            for r in regs.view()
+                c.free(r)
+
+            return Err(e)
+        None -> ()
+
+    var params: Buf[*c.MatchParam] = buf()
+
+    var short = false
+
+    for _ in 0..<regs.len()
+        val mp = new_param(limits)
+
+        if mp == null then short = true else params.push(mp)
+
+    var set: *c.RegSet = null
+    val rc = if short then c.ERR_MEMORY else c.regset_new(&set, i32(regs.len()), as_mut_ptr(regs.view()))
+
+    if rc != c.NORMAL
+        for r in regs.view()
+            c.free(r)
+
+        for mp in params.view()
+            c.free_match_param(mp)
+
+        return Err(error_for(rc))
+
+    Ok(Scanner(set, params))
+end scanner_with

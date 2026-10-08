@@ -1,0 +1,157 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.text.Search
+
+// What this binding adds over the port's surface: byte offsets, the anchored and positioned forms,
+// `\G` at a chosen anchor, the error values, and subjects no literal makes.
+
+@test
+offsets_are_bytes() =
+    val m = find_first("b+", "ééébb").unwrap()
+
+    assert_eq(m.start(), 6)
+    assert_eq(m.end(), 8)
+    assert_eq(m.span(0), Some((6, 8)))
+
+@test
+search_starts_where_it_is_told_and_still_sees_behind() =
+    val r = re("(?<=a)b")
+
+    assert_eq(r.search("abab", 2, 2).expect("ran").unwrap().start(), 3)
+    assert(re("^b").search("ab", 1, 1).expect("ran").is_none())
+
+@test
+search_past_the_end_answers_none() =
+    assert(re("a*").search("aa", 3, 3).expect("ran").is_none())
+    assert_eq(re("a*").search("aa", 2, 2).expect("ran").unwrap().start(), 2)
+
+// A position inside a character is moved to the next boundary rather than handed to the engine.
+@test
+a_position_inside_a_character_moves_to_the_next_boundary() =
+    assert_eq(re(".").search("éx", 1, 1).expect("ran").unwrap().text(), "x")
+
+@test
+g_holds_at_the_anchor_only_where_the_search_starts_there() =
+    val r = re("\\Gb")
+
+    assert_eq(r.search("ab", 1, 1).expect("ran").unwrap().start(), 1)
+    assert(r.search("ab", 1, 0).expect("ran").is_none())
+    assert(r.search("ab", 0, 0).expect("ran").is_none())
+
+@test
+match_at_is_anchored() =
+    val r = re("b+")
+
+    assert(r.match_at("abb", 0, 0).expect("ran").is_none())
+    assert_eq(r.match_at("abb", 1, 1).expect("ran").unwrap().text(), "bb")
+
+@test
+match_at_honours_g_at_the_anchor() =
+    val r = re("\\Gb")
+
+    assert_eq(r.match_at("ab", 1, 1).expect("ran").unwrap().text(), "b")
+    assert(r.match_at("ab", 1, 0).expect("ran").is_none())
+
+@test
+match_at_inside_a_character_answers_none() =
+    assert(re(".").match_at("éx", 1, 1).expect("ran").is_none())
+    assert_eq(re(".").match_at("éx", 2, 2).expect("ran").unwrap().text(), "x")
+
+@test
+match_at_past_the_end_answers_none() =
+    assert(re("").match_at("a", 2, 2).expect("ran").is_none())
+    assert_eq(re("").match_at("a", 1, 1).expect("ran").unwrap().start(), 1)
+
+// `find_all` threads `\G` through: each match must begin where the last one ended.
+@test
+find_all_threads_g_from_match_to_match() =
+    val ms = re("\\Ga").find_all("aab").expect("ran")
+
+    assert_eq(ms.len(), 2)
+    assert_eq(ms.at(1).start(), 1)
+
+@test
+find_all_steps_over_a_whole_character_after_an_empty_match() =
+    val ms = re("").find_all("é").expect("ran")
+
+    assert_eq(ms.len(), 2)
+    assert_eq(ms.at(1).start(), 2)
+
+@test
+the_empty_subject_is_searched() =
+    assert_eq(find_first("^$", "").unwrap().start(), 0)
+    assert(find_first("a", "").is_none())
+
+// **A subject that is a slice of a longer string has no terminator after it**, and nothing past its
+// end may be read: the `c` that follows the slice must not match.
+@test
+a_slice_is_searched_only_to_its_end() =
+    val whole = "abc"
+    val part = whole[0..<2]
+
+    assert(re("c").find(part).expect("ran").is_none())
+    assert(re("b$").find(part).expect("ran").is_some())
+    assert(re("ab\\z").find(part).expect("ran").is_some())
+
+// The same of a pattern: a pattern cut from a longer string ends where the cut does.
+@test
+a_pattern_cut_from_a_longer_string_ends_at_the_cut() =
+    val text = "a+b)))"
+
+    assert_eq(first_match(text[0..<3], "xaab"), "aab")
+
+@test
+a_refused_pattern_says_why() =
+    compile("a(") match
+        Ok(_) -> panic("refused")
+        Err(e) ->
+            assert_eq(describe(e), "end pattern with unmatched parenthesis")
+
+            e match
+                Pattern(_) -> ()
+                _ -> panic("a compile error is Pattern")
+
+// The error text quotes the part of the pattern it is about, through the `ErrorInfo` `onig_new`
+// filled in.
+@test
+a_refusal_quotes_the_name_it_is_about() =
+    val why = compile_fail("\\k<nope>")
+
+    assert(why.contains("nope"), why)
+
+@test
+an_icase_option_compiles_from_outside() =
+    val r = compile_with("abc", textmate() with { icase = true }, default_limits()).expect("compiles")
+
+    assert_eq(r.find("xABC").expect("ran").unwrap().text(), "ABC")
+
+@test
+the_pattern_is_kept() =
+    assert_eq(re("a+b").pattern, "a+b")
+
+@test
+a_scanner_group_reads_like_a_regex_group() =
+    val m = scanner(["(\\d+)-(\\d+)"]).expect("compiles").find_next("x 12-34", 0, 0).expect("ran").unwrap()
+
+    assert_eq(m.found.group(1), Some("12"))
+    assert_eq(m.found.span(2), Some((5, 7)))
+    assert_eq(m.found.group_count(), 3)
+
+// **A scanner compiles with `capture_group` on, as a grammar needs**: a plain group beside a named
+// one keeps its number.
+@test
+a_scanner_numbers_plain_groups_beside_named_ones() =
+    val m = scanner(["(?<k>a)(b)"]).expect("compiles").find_next("ab", 0, 0).expect("ran").unwrap()
+
+    assert_eq(m.found.group(2), Some("b"))
+
+@test
+a_scanner_past_the_end_answers_none() =
+    assert(scanner(["a*"]).expect("compiles").find_next("a", 2, 2).expect("ran").is_none())
+
+@test
+a_scanner_starting_inside_a_character_moves_to_the_next_boundary() =
+    val m = scanner(["."]).expect("compiles").find_next("éx", 1, 1).expect("ran").unwrap()
+
+    assert_eq(m.found.text(), "x")

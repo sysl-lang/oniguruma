@@ -1,0 +1,101 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.text.repeat
+
+// The Scala port's `MatchEmptyLoopSpec`: loops whose body can match nothing terminate quickly, with
+// the match shape Oniguruma chooses, and ordinary loops are unaffected.
+
+@test
+nested_stars_match_a() =
+    assert_eq(first_within(500, "(a*)*", "a").text(), "a")
+
+@test
+nested_stars_match_empty_at_the_start_of_b() =
+    val m = first_within(500, "(a*)*", "b")
+
+    assert_eq(m.text(), "")
+    assert_eq(m.start(), 0)
+
+@test
+nested_stars_match_the_empty_subject() =
+    assert_eq(first_within(500, "(a*)*", "").text(), "")
+
+@test
+nested_stars_swallow_a_long_run() =
+    val input = repeat("a", 1000)
+
+    assert_eq(first_within(500, "(a*)*", input).text(), input)
+
+// **Oniguruma's answer is the empty match**: the reluctant body prefers nothing, and an empty
+// iteration ends the outer loop. The Scala port answers "a" and says engines differ here.
+@test
+a_reluctant_body_in_a_greedy_loop_matches_empty() =
+    val m = first_within(500, "(a*?)*", "aaa")
+
+    assert_eq(m.start(), 0)
+    assert_eq(m.text(), "")
+
+@test
+a_reluctant_body_in_a_greedy_loop_on_the_empty_subject() =
+    assert_eq(first_within(500, "(a*?)*", "").text(), "")
+
+@test
+an_empty_arm_loop_on_the_empty_subject() =
+    assert_eq(first_within(500, "(?:a|)*", "").text(), "")
+
+@test
+an_empty_arm_loop_matches_a() =
+    assert_eq(first_within(500, "(?:a|)*", "a").text(), "a")
+
+@test
+an_empty_arm_loop_matches_empty_before_b() =
+    assert_eq(first_within(500, "(?:a|)*", "b").text(), "")
+
+@test
+an_empty_group_repeated_on_the_empty_subject() =
+    assert_eq(first_within(500, "()*", "").text(), "")
+
+@test
+an_empty_group_repeated_matches_empty_at_the_start() =
+    assert_eq(first_within(500, "()*", "abc").text(), "")
+
+@test
+an_empty_body_with_a_bounded_count() =
+    assert_eq(first_within(500, "(?:){2,5}", "xyz").text(), "")
+
+@test
+deeply_nested_empty_loops_terminate_on_a() =
+    assert_eq(first_within(500, "(((a*)*)*)", "a").text(), "a")
+
+@test
+deeply_nested_empty_loops_terminate_on_the_empty_subject() =
+    assert_eq(first_within(500, "(((a*)*)*)", "").text(), "")
+
+@test
+plus_on_a_hundred_a() =
+    val input = repeat("a", 100)
+
+    assert_eq(first_match("a+", input), input)
+
+@test
+a_group_plus_on_fifty_repetitions() =
+    val input = repeat("ab", 50)
+
+    assert_eq(first_match("(ab)+", input), input)
+
+@test
+an_alternation_star_takes_the_whole_input() =
+    assert_eq(first_match("(a|b)*", "ababab"), "ababab")
+
+@test
+competing_arms_in_a_loop_reach_the_c() =
+    assert_eq(first_match("(a|aa)*c", "aaaac"), "aaaac")
+
+@test
+find_all_on_nested_stars() =
+    val r = re("(a*)*")
+    val ms = r.find_all("aaa").expect("ran")
+
+    assert(ms.len() > 0 && ms.len() < 100)
+    assert_eq(ms.at(0).text(), "aaa")

@@ -1,0 +1,169 @@
+// Oniguruma as C reaches it: the handles the library allocates, the functions over them, and the
+// constants `oniguruma.h` defines.
+//
+// **Nothing here is meant to be called by a program.** A compiled pattern is a bare pointer, a
+// failure is a negative `int` that has to be turned into a sentence by a second call, and a match
+// comes back as a region of `int` offsets read in pairs. The module above this one turns those into
+// a `&Regex` and a `&Scanner` with destructors, and is what an application imports.
+//
+// **There is no shim.** Every function is a real symbol, the region is a plain struct with its
+// layout in the header, the constants are numbers `c const` asks the C compiler for, and the two
+// things the header reaches through a macro — `ONIG_ENCODING_UTF8` and `ONIG_SYNTAX_ONIGURUMA` —
+// are `&` of a variable the library exports, so an `extern` variable names each.
+
+module sh.sysl.oniguruma.c
+
+@link("onig")
+
+@include("oniguruma.h")
+
+// ## The handles
+//
+// Each is allocated by Oniguruma and freed by it. `opaque struct` publishes no layout, so nothing can
+// read a field or make one by hand.
+
+// A compiled pattern — the header's `regex_t`.
+opaque struct Pattern
+
+// A set of compiled patterns searched together. It OWNS the patterns handed to it: freeing the set
+// frees every one of them.
+opaque struct RegSet
+
+// The limits one search runs under.
+opaque struct MatchParam
+
+// A character encoding. Only UTF-8 is ever named here.
+opaque struct Encoding
+
+// A pattern dialect: which escapes and groups mean anything.
+opaque struct Syntax
+
+// Where a match writes its offsets: `num_regs` pairs, group 0 first, each a byte offset from the
+// start of the subject, `-1` for a group that took no part.
+struct Region
+    allocated: i32
+    num_regs: i32
+    beg: *i32
+    end: *i32
+    history_root: *u8
+end Region
+
+// What `onig_new` fills in beside a failure, for the error text to quote — the name of an
+// undefined group, say.
+struct ErrorInfo
+    enc: *Encoding
+    par: *u8
+    par_end: *u8
+
+// ## The exported variables
+//
+// `ONIG_ENCODING_UTF8` is `(&OnigEncodingUTF8)` and `ONIG_SYNTAX_ONIGURUMA` is
+// `(&OnigSyntaxOniguruma)`: the macros take the address of a variable, so the variables are what an
+// `extern` names, and their addresses are what every call is handed.
+
+extern "OnigEncodingUTF8" encoding_utf8: Encoding
+extern "OnigSyntaxOniguruma" syntax_oniguruma: Syntax
+extern "OnigSyntaxRuby" syntax_ruby: Syntax
+
+utf8() -> *Encoding = &encoding_utf8
+
+oniguruma_syntax() -> *Syntax = &syntax_oniguruma
+
+ruby_syntax() -> *Syntax = &syntax_ruby
+
+// ## The constants
+
+c const
+    NORMAL:   i32 = "ONIG_NORMAL"
+    MISMATCH: i32 = "ONIG_MISMATCH"
+
+    ERR_MEMORY:                  i32 = "ONIGERR_MEMORY"
+    ERR_RETRY_LIMIT_IN_MATCH:    i32 = "ONIGERR_RETRY_LIMIT_IN_MATCH_OVER"
+    ERR_RETRY_LIMIT_IN_SEARCH:   i32 = "ONIGERR_RETRY_LIMIT_IN_SEARCH_OVER"
+    ERR_SUBEXP_CALL_LIMIT:       i32 = "ONIGERR_SUBEXP_CALL_LIMIT_IN_SEARCH_OVER"
+    ERR_INVALID_WIDE_CHAR_VALUE: i32 = "ONIGERR_INVALID_WIDE_CHAR_VALUE"
+
+    MAX_ERROR_MESSAGE_LEN: usize = "ONIG_MAX_ERROR_MESSAGE_LEN"
+
+    OPTION_NONE:               u32 = "ONIG_OPTION_NONE"
+    OPTION_IGNORECASE:         u32 = "ONIG_OPTION_IGNORECASE"
+    OPTION_EXTEND:             u32 = "ONIG_OPTION_EXTEND"
+    OPTION_MULTILINE:          u32 = "ONIG_OPTION_MULTILINE"
+    OPTION_CAPTURE_GROUP:      u32 = "ONIG_OPTION_CAPTURE_GROUP"
+    OPTION_WORD_IS_ASCII:      u32 = "ONIG_OPTION_WORD_IS_ASCII"
+    OPTION_DIGIT_IS_ASCII:     u32 = "ONIG_OPTION_DIGIT_IS_ASCII"
+    OPTION_SPACE_IS_ASCII:     u32 = "ONIG_OPTION_SPACE_IS_ASCII"
+    OPTION_POSIX_IS_ASCII:     u32 = "ONIG_OPTION_POSIX_IS_ASCII"
+    OPTION_NOT_BEGIN_POSITION: u32 = "ONIG_OPTION_NOT_BEGIN_POSITION"
+
+    REGSET_POSITION_LEAD: i32 = "ONIG_REGSET_POSITION_LEAD"
+
+// ## Setting up
+
+// Called once before anything is compiled, naming every encoding the program will use.
+@needs(heap)
+extern "onig_initialize" initialize(encodings: **Encoding, count: i32) -> i32
+
+// The library's version, `"6.9.10"` and the like, NUL-terminated and static.
+extern "onig_version" version() -> *u8
+
+// ## Compiling
+
+@needs(heap)
+extern "onig_new" new(reg: **Pattern, pattern: *u8, pattern_end: *u8, option: u32, enc: *Encoding, syntax: *Syntax, einfo: *ErrorInfo) -> i32
+
+extern "onig_free" free(reg: *Pattern)
+
+extern "onig_number_of_captures" number_of_captures(reg: *Pattern) -> i32
+
+// Every group number a name was given — more than one where the pattern declared the name twice.
+// `nums` is pointed at storage the pattern owns.
+extern "onig_name_to_group_numbers" name_to_group_numbers(reg: *Pattern, name: *u8, name_end: *u8, nums: **i32) -> i32
+
+// The sentence for a code. **Variadic in C**: a code that quotes part of the pattern takes the
+// `ErrorInfo` `onig_new` filled in as its third argument, and the others ignore it.
+extern "onig_error_code_to_str" error_code_to_str(s: *u8, code: i32, ...) -> i32
+
+// ## Matching
+
+@needs(heap)
+extern "onig_region_new" region_new() -> *Region
+
+// `free_self` 1 frees the region itself as well as its offset arrays.
+extern "onig_region_free" region_free(region: *Region, free_self: i32)
+
+// The leftmost match starting in `[start, range)`, written into `region`. Answers the byte offset it
+// starts at, `MISMATCH`, or a negative error code.
+extern "onig_search_with_param" search_with_param(reg: *Pattern, str: *u8, end: *u8, start: *u8, range: *u8, region: *Region, option: u32, mp: *MatchParam) -> i32
+
+// A match starting at exactly `at`. Answers the length of the match, `MISMATCH`, or an error code.
+extern "onig_match_with_param" match_with_param(reg: *Pattern, str: *u8, end: *u8, at: *u8, region: *Region, option: u32, mp: *MatchParam) -> i32
+
+@needs(heap)
+extern "onig_new_match_param" new_match_param() -> *MatchParam
+
+extern "onig_free_match_param" free_match_param(mp: *MatchParam)
+
+extern "onig_initialize_match_param" initialize_match_param(mp: *MatchParam) -> i32
+
+extern "onig_set_retry_limit_in_match_of_match_param" set_retry_limit_in_match(mp: *MatchParam, limit: u64) -> i32
+
+extern "onig_set_retry_limit_in_search_of_match_param" set_retry_limit_in_search(mp: *MatchParam, limit: u64) -> i32
+
+// ## Sets
+
+@needs(heap)
+extern "onig_regset_new" regset_new(rset: **RegSet, n: i32, regs: **Pattern) -> i32
+
+@needs(heap)
+extern "onig_regset_add" regset_add(set: *RegSet, reg: *Pattern) -> i32
+
+// Frees the set and every pattern in it.
+extern "onig_regset_free" regset_free(set: *RegSet)
+
+extern "onig_regset_get_region" regset_get_region(set: *RegSet, at: i32) -> *Region
+
+// The leftmost position at which any pattern matches, and at that position the lowest-numbered
+// pattern that does (`REGSET_POSITION_LEAD`). Answers the pattern's index and writes the position to
+// `rmatch_pos`; `MISMATCH` or an error code otherwise. `mps` holds one match parameter per pattern.
+extern "onig_regset_search_with_param" regset_search_with_param(set: *RegSet, str: *u8, end: *u8, start: *u8, range: *u8, lead: i32, option: u32, mps: **MatchParam, rmatch_pos: *i32) -> i32

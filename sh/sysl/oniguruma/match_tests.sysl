@@ -1,0 +1,308 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.text.Search
+
+// The Scala port's `MatchSpec`: literals, the dot, classes, quantifiers, alternation, groups, anchors
+// and the all-matches walk, asserted against the real engine. Offsets are bytes here where the port's
+// are UTF-16 units; the two agree on every ASCII subject below.
+
+@test
+matches_identical_literal() =
+    assert_eq(first_match("abc", "abc"), "abc")
+
+@test
+scans_for_literal_in_larger_input() =
+    assert_eq(first_match("foo", "the foo bar"), "foo")
+
+@test
+no_match_returns_none() =
+    assert(find_first("xyz", "abcdef").is_none())
+
+@test
+match_starts_at_the_first_occurrence() =
+    val m = find_first("foo", "aaa foo bbb foo").unwrap()
+
+    assert_eq(m.start(), 4)
+    assert_eq(m.end(), 7)
+
+@test
+supplementary_codepoints_round_trip() =
+    assert_eq(first_match("😀", "hello 😀 world"), "😀")
+
+@test
+the_dot_matches_any_non_newline() =
+    assert_eq(first_match("a.c", "abc"), "abc")
+    assert_eq(first_match("a.c", "a@c"), "a@c")
+
+@test
+the_dot_fails_on_a_newline_by_default() =
+    assert(find_first("a.c", "a\nc").is_none())
+
+@test
+a_class_picks_any_of_three() =
+    assert_eq(first_match("[abc]", "xyzbpq"), "b")
+
+@test
+a_negated_class_excludes() =
+    assert_eq(first_match("[^abc]", "abcz"), "z")
+
+@test
+a_range_class_is_greedy() =
+    assert_eq(first_match("[a-z]+", "###hello###"), "hello")
+
+@test
+digits_class() =
+    assert_eq(first_match("\\d+", "abc123def"), "123")
+
+@test
+posix_alpha_bracket() =
+    assert_eq(first_match("[[:alpha:]]+", "12abc34"), "abc")
+
+@test
+star_on_no_match_is_empty_at_start() =
+    val m = find_first("a*", "xyz").unwrap()
+
+    assert_eq(m.text(), "")
+    assert_eq(m.start(), 0)
+
+@test
+star_consumes_all() =
+    assert_eq(first_match("a*", "aaab"), "aaa")
+
+@test
+reluctant_star_matches_empty_first() =
+    assert_eq(first_match("a*?", "aaab"), "")
+
+@test
+plus_requires_at_least_one() =
+    assert(find_first("a+", "bbb").is_none())
+    assert_eq(first_match("a+", "baaab"), "aaa")
+
+@test
+question_matches_zero_or_one() =
+    assert_eq(first_match("a?", "ab"), "a")
+    assert_eq(first_match("a?", "xyz"), "")
+
+@test
+exact_count() =
+    assert_eq(first_match("a{3}", "aaaaa"), "aaa")
+    assert(find_first("a{3}", "aa").is_none())
+
+@test
+bounded_count() =
+    assert_eq(first_match("a{2,4}", "aaaaaa"), "aaaa")
+    assert_eq(first_match("a{2,4}", "aaa"), "aaa")
+
+@test
+unbounded_above() =
+    assert_eq(first_match("a{2,}", "aaaaa"), "aaaaa")
+    assert(find_first("a{2,}", "a").is_none())
+
+@test
+possessive_star_does_not_give_back() =
+    assert(find_first("a*+a", "aaaa").is_none())
+
+@test
+greedy_star_gives_back() =
+    assert_eq(first_match("a*a", "aaaa"), "aaaa")
+
+@test
+leftmost_branch_is_preferred() =
+    assert_eq(first_match("abc|abcd", "abcd"), "abc")
+
+@test
+second_branch_when_first_fails() =
+    assert_eq(first_match("xy|ab", "ab"), "ab")
+
+@test
+three_way_alternation() =
+    assert_eq(first_match("cat|dog|fish", "I have a dog"), "dog")
+
+@test
+single_group() =
+    val m = find_first("a(b+)c", "abbbc").unwrap()
+
+    assert_eq(m.text(), "abbbc")
+    assert_eq(m.group(0), Some("abbbc"))
+    assert_eq(m.group(1), Some("bbb"))
+
+@test
+two_sibling_groups() =
+    val m = find_first("(a+)(b+)", "aaabbb").unwrap()
+
+    assert_eq(m.group(1), Some("aaa"))
+    assert_eq(m.group(2), Some("bbb"))
+
+@test
+nested_groups() =
+    val m = find_first("(a(b)c)", "abc").unwrap()
+
+    assert_eq(m.group(1), Some("abc"))
+    assert_eq(m.group(2), Some("b"))
+
+@test
+a_non_capturing_group_takes_no_index() =
+    val r = re("(?:a)(b)")
+
+    assert_eq(r.capture_count(), 1)
+    assert_eq(r.find("ab").expect("ran").unwrap().group(1), Some("b"))
+
+@test
+an_unmatched_group_reports_none() =
+    val m = find_first("(a)|(b)", "b").unwrap()
+
+    assert(m.group(1).is_none())
+    assert_eq(m.group(2), Some("b"))
+
+@test
+a_named_group_is_reachable_by_index() =
+    val r = re("(?<word>\\w+)")
+    val m = r.find("hello world").expect("ran").unwrap()
+
+    assert_eq(m.group(1), Some("hello"))
+    assert_eq(r.group_numbers("word").view(), [1])
+    assert_eq(r.group_numbers("nothing").len(), 0)
+
+@test
+the_slots_are_sized_by_the_groups() =
+    assert_eq(find_first("(a)(b)", "ab").unwrap().group_count(), 3)
+
+@test
+caret_matches_at_input_start() =
+    assert_eq(first_match("^abc", "abc def"), "abc")
+    assert(find_first("^abc", "xyz abc").is_none())
+
+@test
+caret_also_matches_after_a_newline() =
+    assert_eq(first_match("^abc", "xyz\nabc"), "abc")
+
+@test
+dollar_matches_at_input_end() =
+    assert_eq(first_match("xyz$", "abc xyz"), "xyz")
+
+@test
+dollar_also_matches_before_a_newline() =
+    assert_eq(first_match("xyz$", "abc xyz\nmore"), "xyz")
+
+@test
+backslash_a_only_matches_at_input_start() =
+    assert_eq(first_match("\\Aabc", "abc def"), "abc")
+    assert(find_first("\\Aabc", "xyz\nabc").is_none())
+
+@test
+backslash_z_only_matches_at_input_end() =
+    assert_eq(first_match("xyz\\z", "abc xyz"), "xyz")
+    assert(find_first("xyz\\z", "abc xyz\n").is_none())
+
+@test
+capital_z_allows_one_trailing_newline() =
+    assert_eq(first_match("xyz\\Z", "abc xyz\n"), "xyz")
+    assert(find_first("xyz\\Z", "abc xyz\nmore").is_none())
+
+@test
+word_boundary() =
+    assert_eq(first_match("\\bfoo\\b", "  foo bar"), "foo")
+    assert(find_first("\\bfoo\\b", "barfoo").is_none())
+
+// **`\b` is Unicode**: there is no boundary on either side of a letter outside ASCII, so a grammar's
+// `\bif\b` does not fire inside `síif`. The set is letters, marks, numbers and connectors, and a
+// currency symbol is not in it.
+@test
+b_is_unicode_aware() =
+    assert(find_first("x\\bÁ", "xÁy").is_none())
+    assert(find_first("caf\\bé", "café").is_none())
+    assert(find_first("a\\b名", "a名").is_none())
+
+    assert_eq(first_match("\\bÁrbol", "x Árbol"), "Árbol")
+    assert_eq(find_first("\\bÁrbol", "x Árbol").unwrap().start(), 2)
+    assert_eq(first_match("\\bcafé\\b", "un café ahora"), "café")
+
+    assert(find_first("a\\b٣", "a٣").is_none())
+    assert(find_first("a\\bⅧ", "aⅧ").is_none())
+    assert(find_first("a\\b¹", "a¹").is_none())
+    assert(find_first("a\\b\u{203f}", "a\u{203f}").is_none())
+    assert_eq(first_match("a\\b", "a$"), "a")
+    assert_eq(find_first("a\\b\\$", "a$").unwrap().start(), 0)
+
+    assert_eq(first_match("a\\b", "a b"), "a")
+    assert_eq(first_match("a\\b", "a-b"), "a")
+
+// **Under the TextMate default `\w` is Unicode too**, which is what vscode-oniguruma answers. The
+// Scala port's `\w`-is-ASCII is Ruby's (Onigmo's) reading, which Oniguruma has no setting for.
+@test
+w_is_unicode_under_the_textmate_default() =
+    assert_eq(first_match("\\w", "Á"), "Á")
+
+// **`word_is_ascii` takes `\w` and `\b` to ASCII together**: Oniguruma has one switch for both.
+@test
+word_is_ascii_moves_w_and_b_together() =
+    val ascii_word = Options(false, false, false, true, true, false, false, false)
+    val w = compile_with("\\w", ascii_word, default_limits()).expect("compiles")
+    val b = compile_with("x\\bÁ", ascii_word, default_limits()).expect("compiles")
+
+    assert(w.find("Á").expect("ran").is_none())
+    assert_eq(b.find("xÁy").expect("ran").unwrap().text(), "xÁ")
+
+@test
+non_boundary_follows_the_same_unicode_set() =
+    assert_eq(first_match("x\\BÁ", "xÁy"), "xÁ")
+    assert(find_first("\\BÁrbol", "x Árbol").is_none())
+
+@test
+non_word_boundary() =
+    assert_eq(first_match("\\Bfoo\\B", "abfoobar"), "foo")
+
+@test
+g_first_attempt_is_start_of_input() =
+    assert_eq(first_match("\\Gabc", "abc"), "abc")
+    assert(find_first("\\Gxyz", "xxyz").is_none())
+
+@test
+find_all_returns_every_non_overlapping_match() =
+    val ms = re("\\d+").find_all("a1b22c333").expect("ran")
+
+    assert_eq(ms.len(), 3)
+    assert_eq(ms.at(0).text(), "1")
+    assert_eq(ms.at(1).text(), "22")
+    assert_eq(ms.at(2).text(), "333")
+
+@test
+find_all_with_no_matches_is_empty() =
+    assert_eq(re("xyz").find_all("abcdef").expect("ran").len(), 0)
+
+@test
+find_all_advances_past_zero_width_hits() =
+    val ms = re("a*").find_all("aabaa").expect("ran")
+    var saw_aa = false
+
+    for m in ms.view()
+        if m.text() == "aa" then saw_aa = true
+
+    assert(saw_aa)
+    assert(ms.len() > 0 && ms.len() < 100)
+
+// **Oniguruma refuses a relative reference with nothing before it** — the port says so in its own
+// words; these are the engine's.
+@test
+relative_backref_with_no_preceding_group_is_refused() =
+    assert(compile_fail("\\k<-1>").contains("invalid backref number"))
+
+@test
+relative_subroutine_call_with_no_preceding_group_is_refused() =
+    // With no group before it `\g<-1>` is `\g<0>`, the whole pattern calling itself with nothing
+    // consumed first.
+    assert_eq(compile_fail("\\g<-1>"), "never ending recursion")
+
+@test
+subroutine_call_to_undefined_group_is_refused() =
+    assert(compile_fail("\\g<7>").contains("undefined"))
+
+// **Oniguruma 6.9 refuses a backreference past the pattern's groups**, where the Scala port accepts
+// it as a reference that never matches. The corpus's `(\3)` patterns are TextMate `end` patterns whose
+// `\3` a tokenizer replaces with the `begin` match's text before compiling (see `corpus_tests.sysl`).
+@test
+a_backreference_beyond_the_declared_count_is_refused() =
+    assert(compile_fail("(\\3)|abc").contains("invalid backref number"))
+    assert(compile_fail("(a)\\2").contains("invalid backref number"))
+    assert(compile_fail("\\1").contains("invalid backref number"))

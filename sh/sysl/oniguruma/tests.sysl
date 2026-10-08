@@ -1,0 +1,37 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.text.Search
+import sysl.time.{Duration, monotonic, whole_millis}
+
+// The tests every other file leans on: compile-or-fail and first-match helpers, in the shape of the
+// Scala port's `CompilerHelpers`, whose specs these files port.
+
+re(pattern: string) -> &Regex = compile(pattern).expect(s"'${pattern}' compiles")
+
+// The text of the first match, failing the test where there is none.
+first_match(pattern: string, s: string) -> string = re(pattern).find(s).expect("the search ran").expect(s"'${pattern}' matches '${s}'").text()
+
+// The first match, or nothing.
+find_first(pattern: string, s: string) -> Option[Match] = re(pattern).find(s).expect("the search ran")
+
+// Oniguruma's reason a pattern is not one, failing the test where it compiles.
+compile_fail(pattern: string) -> string = compile(pattern) match
+    Ok(_) -> panic(s"'${pattern}' was expected to be refused")
+    Err(e) -> describe(e)
+
+// The first match, failing the test where there is none or where finding it took longer than
+// `most` milliseconds — the bound a backtracking pathology would blow through.
+first_within(most: long, pattern: string, s: string) -> Match
+    val r = re(pattern)
+    val t0 = monotonic()
+    val m = r.find(s).expect("the search ran").expect(s"'${pattern}' matches")
+    val ms = whole_millis(monotonic() - t0)
+
+    assert(ms < most, s"'${pattern}' took ${ms} ms, more than ${most}")
+    m
+end first_within
+
+@test
+the_library_is_linked() =
+    assert(version().starts_with("6."), s"Oniguruma 6 is linked, got ${version()}")

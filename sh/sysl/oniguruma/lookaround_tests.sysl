@@ -1,0 +1,149 @@
+module sh.sysl.oniguruma
+@tests
+
+// The Scala port's `MatchLookaroundSpec`: both directions, both polarities, and what a lookaround's
+// groups leave behind.
+
+@test
+lookahead_matches_digits_followed_by_px() =
+    assert_eq(first_match("\\d+(?=px)", "10px 20em"), "10")
+
+@test
+lookahead_is_zero_width() =
+    val m = find_first("\\d+(?=px)", "10px").unwrap()
+
+    assert_eq(m.text(), "10")
+    assert_eq(m.end(), 2)
+
+@test
+lookahead_fails_when_its_body_does() =
+    assert(find_first("\\d+(?=px)", "10em").is_none())
+
+@test
+negative_lookahead_matches_digits_not_followed_by_px() =
+    assert_eq(first_match("\\d+(?!px)", "10em"), "10")
+
+@test
+negative_lookahead_shrinks_a_greedy_match() =
+    assert_eq(first_match("\\d+(?!px)", "10px 20em"), "1")
+
+@test
+negative_lookahead_scans_past_where_it_always_fails() =
+    assert_eq(first_match("\\b\\d+\\b(?!px)", "10px 20"), "20")
+
+@test
+lookbehind_matches_digits_after_a_dollar() =
+    assert_eq(first_match("(?<=\\$)\\d+", "price $100 today"), "100")
+
+@test
+lookbehind_fails_when_its_body_does() =
+    assert(find_first("(?<=\\$)\\d+", "100 dollars").is_none())
+
+@test
+lookbehind_with_arms_of_different_lengths() =
+    assert_eq(first_match("(?<=ab|cde)x", "abx"), "x")
+    assert_eq(first_match("(?<=ab|cde)x", "cdex"), "x")
+    assert(find_first("(?<=ab|cde)x", "fx").is_none())
+
+@test
+negative_lookbehind_matches_digits_not_after_a_dollar() =
+    assert_eq(first_match("(?<!\\$)\\d+", "abc 20 $30"), "20")
+
+@test
+negative_lookbehind_rejects_the_position_a_dollar_precedes() =
+    assert(find_first("(?<!\\$)\\d", "$5").is_none())
+
+@test
+lookahead_pins_a_boundary() =
+    assert_eq(first_match("\\w+(?=[.!?])", "hello."), "hello")
+
+@test
+nested_lookaheads_must_both_hold() =
+    assert_eq(first_match("(?=a(?=b))ab", "ab"), "ab")
+    assert(find_first("(?=a(?=b))ab", "ax").is_none())
+
+@test
+a_group_in_a_positive_lookahead_leaks_out() =
+    val m = find_first("(?=(\\w+))", "hello world").unwrap()
+
+    assert_eq(m.text(), "")
+    assert_eq(m.start(), 0)
+    assert_eq(m.end(), 0)
+    assert_eq(m.group(1), Some("hello"))
+
+@test
+a_lookahead_group_then_a_literal_consumes_nothing_extra() =
+    val m = find_first("(?=(\\w+))\\w", "abc").unwrap()
+
+    assert_eq(m.text(), "a")
+    assert_eq(m.group(1), Some("abc"))
+
+@test
+a_backreference_into_a_lookahead_capture() =
+    val m = find_first("(?=(\\w+))\\1", "foo bar").unwrap()
+
+    assert_eq(m.text(), "foo")
+    assert_eq(m.group(1), Some("foo"))
+
+// **A lookbehind's capture reaches the match, and it is the SHORTEST the body allows**: Oniguruma
+// reads a variable-length lookbehind backwards from the position, so `\w+` stops at one character.
+// The Scala port answers "hello".
+@test
+a_capture_in_a_lookbehind_reaches_the_match() =
+    val m = find_first("(?<=(\\w+) )\\w+", "hello world").unwrap()
+
+    assert_eq(m.text(), "world")
+    assert_eq(m.group(1), Some("o"))
+    assert_eq(m.span(1), Some((4, 5)))
+
+@test
+nested_captures_in_a_positive_lookahead_all_propagate() =
+    val m = find_first("(?=(\\d+)-(\\d+))", "12-34").unwrap()
+
+    assert_eq(m.text(), "")
+    assert_eq(m.group(1), Some("12"))
+    assert_eq(m.group(2), Some("34"))
+
+@test
+a_negative_lookahead_propagates_no_capture() =
+    val m = find_first("(?!(\\d+))[a-z]+", "abc").unwrap()
+
+    assert_eq(m.text(), "abc")
+    assert(m.group(1).is_none())
+
+// **Oniguruma refuses a capture inside a negative lookbehind**, where the Scala port accepts one and
+// leaves it unset.
+@test
+a_negative_lookbehind_may_not_capture() =
+    assert_eq(compile_fail("(?<!(\\d+))[a-z]+"), "invalid pattern in look-behind")
+
+@test
+a_failed_positive_lookahead_leaks_no_capture() =
+    val m = find_first("(?=(\\d+))|([a-z]+)", "abc").unwrap()
+
+    assert_eq(m.text(), "abc")
+    assert(m.group(1).is_none())
+    assert_eq(m.group(2), Some("abc"))
+
+@test
+an_outer_capture_survives_a_lookaround_beside_it() =
+    val m = find_first("([a-z]+)(?=(\\d+))", "abc123").unwrap()
+
+    assert_eq(m.text(), "abc")
+    assert_eq(m.group(1), Some("abc"))
+    assert_eq(m.group(2), Some("123"))
+
+@test
+a_later_capture_overwrites_a_lookahead_one() =
+    val m = find_first("(?=(\\w+))(\\w+)", "hello").unwrap()
+
+    assert_eq(m.text(), "hello")
+    assert_eq(m.group(1), Some("hello"))
+    assert_eq(m.group(2), Some("hello"))
+
+@test
+a_nested_lookaround_propagates_the_innermost_capture() =
+    val m = find_first("(?=(?=(\\w+))).", "hi").unwrap()
+
+    assert_eq(m.text(), "h")
+    assert_eq(m.group(1), Some("hi"))

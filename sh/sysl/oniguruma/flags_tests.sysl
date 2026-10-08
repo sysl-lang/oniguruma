@@ -1,0 +1,132 @@
+module sh.sysl.oniguruma
+@tests
+
+// The Scala port's `MatchFlagsSpec` — `(?i)`, `(?m)` and their scoped forms — and the part of its
+// `FlagsSpec` a binding can observe: that each of `Options`' switches is a bit of its own and that
+// each one, set from outside the pattern, changes what matches.
+
+@test
+icase_matches_both_cases_of_a_letter() =
+    assert_eq(first_match("(?i)a", "ABC"), "A")
+    assert_eq(first_match("(?i)a", "abc"), "a")
+
+@test
+icase_matches_a_literal_in_any_case() =
+    assert_eq(first_match("(?i)abc", "XYZABCDEF"), "ABC")
+    assert_eq(first_match("(?i)abc", "AbCdef"), "AbC")
+
+@test
+icase_applies_to_classes() =
+    assert_eq(first_match("(?i)[a-z]+", "Hello!"), "Hello")
+    assert_eq(first_match("(?i)[a-z]+", "ABCDEF"), "ABCDEF")
+
+@test
+icase_leaves_non_letters_alone() =
+    assert_eq(first_match("(?i)1+", "111"), "111")
+    assert(find_first("(?i)1+", "abc").is_none())
+
+@test
+a_scoped_icase_ends_with_its_group() =
+    assert(find_first("(?i:a)b", "Ab").is_some())
+    assert(find_first("(?i:a)b", "AB").is_none())
+
+@test
+a_leading_icase_reaches_its_siblings() =
+    assert_eq(first_match("(?i)ab", "AB"), "AB")
+
+// Oniguruma's case folding is Unicode's, not ASCII's.
+@test
+icase_folds_outside_ascii() =
+    assert_eq(first_match("(?i)á", "Á"), "Á")
+
+@test
+without_m_the_dot_skips_a_newline() =
+    assert(find_first("a.b", "a\nb").is_none())
+
+@test
+with_m_the_dot_matches_a_newline() =
+    assert_eq(first_match("(?m)a.b", "a\nb"), "a\nb")
+
+@test
+a_scoped_m_ends_with_its_group() =
+    assert_eq(first_match("(?m:.)c", "\nc"), "\nc")
+    assert(find_first("(?m:.).c", "\n\nc").is_none())
+
+@test
+im_together_fold_case_and_cross_lines() =
+    assert_eq(first_match("(?im)a.B", "A\nb"), "A\nb")
+
+// ## The switches, set from outside
+
+private none() -> Options = Options(false, false, false, false, false, false, false, false)
+
+private with_pattern(pattern: string, o: Options) -> &Regex = compile_with(pattern, o, default_limits()).expect(s"'${pattern}' compiles")
+
+@test
+every_switch_is_a_bit_of_its_own() =
+    val singles: [8]u32 = [
+        (none() with { icase = true }).code(),
+        (none() with { extended = true }).code(),
+        (none() with { dot_all = true }).code(),
+        (none() with { capture_group = true }).code(),
+        (none() with { word_is_ascii = true }).code(),
+        (none() with { digit_is_ascii = true }).code(),
+        (none() with { space_is_ascii = true }).code(),
+        (none() with { posix_is_ascii = true }).code()]
+
+    assert_eq(none().code(), 0)
+
+    var all: u32 = 0
+
+    for i in 0..<8
+        assert(singles[i] != 0, s"switch ${i} sets a bit")
+        assert_eq(all & singles[i], 0, s"switch ${i} shares no bit with those before it")
+        all |= singles[i]
+
+    assert_eq(ascii().code(), all & ~(none() with { icase = true }).code() & ~(none() with { extended = true }).code() & ~(none() with { dot_all = true }).code())
+
+@test
+the_icase_switch_folds_case() =
+    assert(with_pattern("abc", none()).find("ABC").expect("ran").is_none())
+    assert_eq(with_pattern("abc", none() with { icase = true }).find("ABC").expect("ran").unwrap().text(), "ABC")
+
+@test
+the_extended_switch_ignores_whitespace_and_comments() =
+    assert(with_pattern("a b # c", none()).find("ab").expect("ran").is_none())
+    assert_eq(with_pattern("a b # c", none() with { extended = true }).find("ab").expect("ran").unwrap().text(), "ab")
+
+@test
+the_dot_all_switch_crosses_lines() =
+    assert(with_pattern("a.b", none()).find("a\nb").expect("ran").is_none())
+    assert_eq(with_pattern("a.b", none() with { dot_all = true }).find("a\nb").expect("ran").unwrap().text(), "a\nb")
+
+// **The switch a TextMate grammar's `captures` table depends on**: without it a pattern that names
+// one group stops numbering the plain ones.
+@test
+the_capture_group_switch_numbers_plain_groups_beside_named_ones() =
+    val bare = with_pattern("(?<k>a)(b)", none())
+    val counted = with_pattern("(?<k>a)(b)", none() with { capture_group = true })
+
+    assert_eq(bare.capture_count(), 1)
+    assert_eq(counted.capture_count(), 2)
+    assert_eq(counted.find("ab").expect("ran").unwrap().group(2), Some("b"))
+
+@test
+the_digit_switch_takes_d_to_ascii() =
+    assert_eq(with_pattern("\\d", none()).find("٣").expect("ran").unwrap().text(), "٣")
+    assert(with_pattern("\\d", none() with { digit_is_ascii = true }).find("٣").expect("ran").is_none())
+
+@test
+the_space_switch_takes_s_to_ascii() =
+    assert_eq(with_pattern("\\s", none()).find("\u{a0}").expect("ran").unwrap().text(), "\u{a0}")
+    assert(with_pattern("\\s", none() with { space_is_ascii = true }).find("\u{a0}").expect("ran").is_none())
+
+@test
+the_posix_switch_takes_the_brackets_to_ascii() =
+    assert_eq(with_pattern("[[:alpha:]]", none()).find("Á").expect("ran").unwrap().text(), "Á")
+    assert(with_pattern("[[:alpha:]]", none() with { posix_is_ascii = true }).find("Á").expect("ran").is_none())
+
+@test
+the_word_switch_takes_w_to_ascii() =
+    assert_eq(with_pattern("\\w", none()).find("Á").expect("ran").unwrap().text(), "Á")
+    assert(with_pattern("\\w", none() with { word_is_ascii = true }).find("Á").expect("ran").is_none())

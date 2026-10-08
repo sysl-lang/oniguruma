@@ -1,0 +1,303 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{Search, repeat}
+import sysl.time.{monotonic, whole_millis}
+
+// The Scala port's `TmScannerSpec`, the scanner half of `BashGrammarHangSpec`, and `InterruptSpec`'s
+// intent — a pathological pattern gives up rather than holding the thread.
+
+private sc(patterns: []const string) -> &Scanner = scanner(patterns).expect("the patterns compile")
+
+private next(s: &Scanner, input: string, start: usize, anchor: usize) -> Option[ScanMatch] = s.find_next(input, start, anchor).expect("the scan ran")
+
+@test
+an_empty_scanner_always_answers_none() =
+    val s = sc([])
+
+    assert(next(s, "anything", 0, 0).is_none())
+    assert_eq(s.size(), 0)
+
+@test
+one_pattern_matches_at_the_start() =
+    val m = next(sc(["foo"]), "foo bar", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.text(), "foo")
+    assert_eq(m.found.start(), 0)
+
+@test
+one_pattern_scans_forward() =
+    val m = next(sc(["bar"]), "foo bar baz", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.start(), 4)
+
+@test
+one_pattern_answers_none_when_nothing_matches() =
+    assert(next(sc(["xyz"]), "abc def", 0, 0).is_none())
+
+@test
+the_start_offset_is_respected() =
+    assert_eq(next(sc(["\\w+"]), "foo bar", 4, 0).unwrap().found.text(), "bar")
+
+@test
+the_lowest_index_wins_a_tie() =
+    val m = next(sc(["abc", "ab"]), "abc def", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.text(), "abc")
+
+@test
+swapping_the_order_changes_the_matched_text() =
+    val m = next(sc(["ab", "abc"]), "abc def", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.text(), "ab")
+
+@test
+an_earlier_position_beats_a_lower_index() =
+    val m = next(sc(["baz", "foo"]), "foo bar baz", 0, 0).unwrap()
+
+    assert_eq(m.index, 1)
+    assert_eq(m.found.start(), 0)
+
+@test
+the_scanner_walks_until_something_matches() =
+    val m = next(sc(["xyz", "bar"]), "foo bar baz", 0, 0).unwrap()
+
+    assert_eq(m.index, 1)
+    assert_eq(m.found.text(), "bar")
+
+@test
+g_fires_at_the_start_on_the_first_call() =
+    val m = next(sc(["\\Gfoo"]), "foofoo", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.start(), 0)
+
+@test
+g_fires_only_at_the_supplied_anchor() =
+    val s = sc(["\\Gfoo"])
+
+    assert_eq(next(s, "foofoo", 3, 3).unwrap().found.start(), 3)
+    assert(next(s, "foofoo", 3, 0).is_none())
+
+// Offsets are bytes: the emoji is four of them where the port counts two UTF-16 units.
+@test
+the_scanner_walks_past_a_non_matching_emoji() =
+    val m = next(sc(["hi"]), "😀hi", 0, 0).unwrap()
+
+    assert_eq(m.found.start(), 4)
+    assert_eq(m.found.text(), "hi")
+
+@test
+the_first_bad_pattern_is_named_with_its_index() =
+    scanner(["ok", "(unbalanced"]) match
+        Ok(_) -> panic("the second pattern should be refused")
+        Err(e) ->
+            assert_eq(describe(e), "pattern 1: end pattern with unmatched parenthesis")
+
+            e match
+                ScannerPattern(index, _) -> assert_eq(index, 1)
+                _ -> panic("a scanner pattern's refusal is ScannerPattern")
+
+@test
+a_broken_pattern_refuses_the_whole_scanner() =
+    assert(scanner(["ok", "(broken"]).is_err())
+
+// The conventional scan loop: call again from where the last match ended until nothing matches.
+@test
+successive_calls_tokenize_a_line() =
+    val s = sc(["\\d+", "[a-z]+"])
+    val input = "abc 123 def 456"
+    var out: Buf[(usize, string)] = buf()
+    var pos: usize = 0
+
+    loop
+        assert(out.len() < 100, "the scan loop stops making progress")
+
+        next(s, input, pos, pos) match
+            None -> break
+            Some(m) ->
+                out.push((m.index, m.found.text()))
+                pos = m.found.end()
+
+    assert_eq(out.len(), 4)
+    assert_eq(out.at(0), (1, "abc"))
+    assert_eq(out.at(1), (0, "123"))
+    assert_eq(out.at(2), (1, "def"))
+    assert_eq(out.at(3), (0, "456"))
+
+// ## The bash grammar's pattern sets, from the downstream hang report
+
+private qstring_double_inner() -> [10]string = [
+    "\"",
+    "\\\\[\\$\\n`\"\\\\]",
+    "(?:(\\$)(\\@(?!\\w)))",
+    "(?:(\\$)([0-9](?!\\w)))",
+    "(?:(\\$)([-*#?$!0_](?!\\w)))",
+    "(?:(\\$)(\\{)(?:[ \\t]*+)(?=\\d))",
+    "(?:(\\$)(\\{))",
+    "(?:(\\$)((?:\\w+)(?!\\w)))",
+    "(?:\\$\\()",
+    "`"]
+
+private for_loop() -> [7]string = [
+    "(?<=^|;|&|\\s)(then|else|elif|fi|for|in|do|done|select|continue|esac|while|until|return)(?=\\s|;|&|$)",
+    "\\\\(?=\\n)",
+    "(?<=^|\\s|;|&|\\()[0-9]+\\b",
+    "(?:(\\$)((?:\\w+)(?!\\w)))",
+    "[;&]",
+    "[ \\t]+",
+    "(?<=^|;|&|\\s)[a-zA-Z_][a-zA-Z0-9_]*"]
+
+// One scan, failing the test where it took longer than the port's 500 ms budget.
+private timed(s: &Scanner, input: string, start: usize, anchor: usize) -> Option[ScanMatch]
+    val t0 = monotonic()
+    val m = next(s, input, start, anchor)
+    val ms = whole_millis(monotonic() - t0)
+
+    assert(ms < 500, s"the scan took ${ms} ms")
+    m
+end timed
+
+@test
+the_string_body_finds_the_variable() =
+    val m = timed(sc(qstring_double_inner()), "echo \"$HOME\"", 6, 0).unwrap()
+
+    assert_eq(m.index, 7)
+    assert_eq(m.found.start(), 6)
+    assert_eq(m.found.end(), 11)
+
+@test
+the_string_body_finds_the_closing_quote() =
+    val m = timed(sc(qstring_double_inner()), "echo \"$HOME\"", 11, 11).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.start(), 11)
+
+@test
+the_string_body_does_not_hang_before_a_quote() =
+    assert_eq(timed(sc(qstring_double_inner()), "\"", 0, 0).unwrap().index, 0)
+
+@test
+the_whole_string_body_scans_within_budget() =
+    val s = sc(qstring_double_inner())
+    val input = "echo \"$HOME\""
+    var hits: Buf[usize] = buf()
+    var pos: usize = 6
+    var prev: usize = 6
+    val t0 = monotonic()
+
+    loop
+        if pos > input.bytes.len then break
+
+        assert(hits.len() < 100, "the scan loop stops making progress")
+
+        next(s, input, pos, prev) match
+            None -> break
+            Some(m) ->
+                hits.push(m.index)
+                prev = m.found.end()
+                pos = if m.found.end() == m.found.start() then pos + 1 else m.found.end()
+
+                if m.index == 0 then break
+
+    assert(whole_millis(monotonic() - t0) < 500)
+    assert_eq(hits.view(), [7, 0])
+end the_whole_string_body_scans_within_budget
+
+@test
+the_for_loop_finds_its_keyword() =
+    val m = timed(sc(for_loop()), "for i in 1 2 3; do echo $i; done", 0, 0).unwrap()
+
+    assert_eq(m.index, 0)
+    assert_eq(m.found.text(), "for")
+
+@test
+the_whole_for_loop_tokenizes_within_budget() =
+    val s = sc(for_loop())
+    val input = "for i in 1 2 3; do echo $i; done"
+    var pos: usize = 0
+    var prev: usize = 0
+    var count: usize = 0
+    val t0 = monotonic()
+
+    loop
+        if pos > input.bytes.len || count >= 200 then break
+
+        next(s, input, pos, prev) match
+            None -> break
+            Some(m) ->
+                count += 1
+                prev = m.found.end()
+                pos = if m.found.end() == m.found.start() then pos + 1 else m.found.end()
+
+    assert(whole_millis(monotonic() - t0) < 500)
+    assert(count > 0 && count < 200)
+end the_whole_for_loop_tokenizes_within_budget
+
+// ## A pathological pattern gives up
+
+// **The port's `InterruptSpec` stops `(a+)+b` from the outside; here the retry budget stops it from
+// the inside**, as `RetryLimit` and within a bound, rather than holding the thread for the seconds the
+// exponential search would take.
+@test
+an_exponential_pattern_runs_out_of_budget_quickly() =
+    val r = re("(a+)+b")
+    val input = repeat("a", 40)
+    val t0 = monotonic()
+
+    r.find(input) match
+        Err(RetryLimit) -> ()
+        Err(e) -> panic(s"expected RetryLimit, got ${describe(e)}")
+        Ok(m) -> panic(s"expected RetryLimit, got an answer: ${m.is_some()}")
+
+    val ms = whole_millis(monotonic() - t0)
+
+    assert(ms < 1000, s"giving up took ${ms} ms")
+
+@test
+a_scanner_reports_the_budget_running_out() =
+    val s = sc(["(a+)+b", "zzz"])
+
+    s.find_next(repeat("a", 40), 0, 0) match
+        Err(RetryLimit) -> ()
+        _ -> panic("expected RetryLimit")
+
+// The budget is the caller's to set: a larger one lets a search finish that the default stops.
+@test
+a_larger_budget_lets_a_costly_search_finish() =
+    val input = s"${repeat("a", 18)}b"
+    val tight = compile_with("(a+)+$", textmate(), Limits(1000, 0)).expect("compiles")
+    val loose = compile_with("(a+)+$", textmate(), Limits(0, 0)).expect("compiles")
+
+    assert(tight.find(input).is_err())
+    assert(loose.find(input).expect("an unlimited search finishes").is_none())
+
+// **The per-search budget is set too**: no single position here costs ten million retries, and the
+// positions together do. With no per-search limit the same search runs to its end and finds nothing.
+@test
+the_search_budget_bounds_the_sum_of_the_positions() =
+    val input = s"${repeat("a", 23)}c"
+    val bounded = re("(a+)+b")
+    val per_position = compile_with("(a+)+b", textmate(), Limits(10000000, 0)).expect("compiles")
+
+    bounded.find(input) match
+        Err(RetryLimit) -> ()
+        _ -> panic("expected the default budget to run out over the whole search")
+
+    assert(per_position.find(input).expect("each position fits its own budget").is_none())
+
+// Many short searches in a row — the tokenizer's call shape — each answer at once.
+@test
+many_short_searches_stay_fast() =
+    val r = re("\\d+")
+    val t0 = monotonic()
+
+    for _ in 0..<100000
+        assert(r.find("abc").expect("ran").is_none())
+
+    assert(whole_millis(monotonic() - t0) < 2000)

@@ -1,0 +1,69 @@
+module sh.sysl.oniguruma
+@tests
+
+// The Scala port's `MatchSubroutineSpec`: `\g<n>`, `\g<name>`, `\g<0>` and the relative forms.
+
+@test
+a_subroutine_call_reruns_a_group() =
+    assert_eq(first_match("(a)\\g<1>", "aa"), "aa")
+
+@test
+a_subroutine_call_fails_where_its_group_would() =
+    assert(find_first("(a)\\g<1>", "ab").is_none())
+
+// **In Oniguruma a call's captures DO reach the caller**: group 1 ends where the call's `(a)` ended.
+// The Scala port keeps the original capture, as PCRE's `(?R)` does.
+@test
+a_subroutine_call_overwrites_its_group() =
+    val m = find_first("(a)\\g<1>", "aa").unwrap()
+
+    assert_eq(m.text(), "aa")
+    assert_eq(m.group(1), Some("a"))
+    assert_eq(m.span(1), Some((1, 2)))
+
+@test
+a_forward_referenced_subroutine_call() =
+    assert_eq(first_match("\\g<1>(a)", "aa"), "aa")
+
+@test
+a_named_subroutine_call() =
+    assert_eq(first_match("(?<word>\\w+)\\s\\g<word>", "the dog"), "the dog")
+
+@test
+whole_pattern_recursion_balances_parentheses() =
+    assert_eq(first_match("\\(\\g<0>?\\)", "()"), "()")
+    assert_eq(first_match("\\(\\g<0>?\\)", "(())"), "(())")
+    assert_eq(first_match("\\(\\g<0>?\\)", "((()))"), "((()))")
+
+@test
+whole_pattern_recursion_fails_when_unbalanced() =
+    assert(find_first("^\\(\\g<0>?\\)", "()(").is_some())
+    assert(find_first("^\\(\\g<0>?\\)$", "(()").is_none())
+
+@test
+a_group_calling_itself_nests() =
+    assert_eq(first_match("(\\((?:[^()]|\\g<1>)*\\))", "before(a(b)c)after"), "(a(b)c)")
+
+// **A recursion that consumes nothing first is refused at compile time** — the Scala port bounds it
+// at run time instead; either way nothing hangs.
+@test
+recursion_with_no_progress_is_refused() =
+    assert_eq(compile_fail("\\g<0>"), "never ending recursion")
+
+@test
+a_relative_call_to_the_last_group() =
+    assert_eq(first_match("(a)\\g<-1>", "aa"), "aa")
+    assert(find_first("(a)\\g<-1>", "ab").is_none())
+
+@test
+a_relative_call_two_groups_back() =
+    assert_eq(first_match("(a)(b)\\g<-2>", "aba"), "aba")
+    assert(find_first("(a)(b)\\g<-2>", "abb").is_none())
+
+@test
+a_relative_forward_call() =
+    assert_eq(first_match("\\g<+1>(a)", "aa"), "aa")
+
+@test
+a_group_calling_itself_relatively() =
+    assert_eq(first_match("(a\\g<-1>?)", "aaa"), "aaa")

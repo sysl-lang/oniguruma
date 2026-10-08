@@ -1,0 +1,123 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.text.Search
+
+// The Scala port's `MatchBackrefSpec`: numbered, named, case-folded and relative backreferences.
+
+@test
+a_backreference_matches_a_doubled_run() =
+    val m = find_first("(a+)\\1", "aaaa").unwrap()
+
+    assert_eq(m.text(), "aaaa")
+    assert_eq(m.group(1), Some("aa"))
+
+@test
+a_backreference_matches_any_doubled_char() =
+    assert_eq(first_match("(.)\\1", "abccd"), "cc")
+    assert_eq(first_match("(.)\\1", "ZZyy"), "ZZ")
+
+@test
+two_backreferences_match_a_palindrome() =
+    assert_eq(first_match("(.)(.)\\2\\1", "abba"), "abba")
+    assert(find_first("(.)(.)\\2\\1", "abcd").is_none())
+
+@test
+a_captured_empty_group_backreferences_empty() =
+    val m = find_first("(a*)b\\1", "b").unwrap()
+
+    assert_eq(m.text(), "b")
+    assert_eq(m.group(1), Some(""))
+
+@test
+an_uncaptured_group_fails_its_backreference() =
+    assert(find_first("(?:(a)|(b))\\1", "bb").is_none())
+    assert_eq(first_match("(?:(a)|(b))\\1", "aa"), "aa")
+
+@test
+a_named_backreference_matches_the_captured_text() =
+    val m = find_first("(?<word>\\w+)\\s+\\k<word>", "the the").unwrap()
+
+    assert_eq(m.text(), "the the")
+    assert_eq(m.group(1), Some("the"))
+
+@test
+a_named_backreference_fails_on_different_text() =
+    assert(find_first("(?<word>\\w+)\\s+\\k<word>", "the dog").is_none())
+
+@test
+a_case_insensitive_backreference_folds_case() =
+    assert_eq(first_match("(?i)(a)\\1", "aA"), "aA")
+    assert_eq(first_match("(?i)(a)\\1", "Aa"), "Aa")
+
+@test
+a_case_insensitive_multi_char_backreference() =
+    assert_eq(first_match("(?i)(.+)\\1", "abcABC"), "abcABC")
+
+@test
+without_i_a_case_mismatch_fails_the_backreference() =
+    assert(find_first("(.+)\\1", "abcABC").is_none())
+
+// A name declared twice answers both numbers, and `\k<x>` tries each.
+@test
+a_backreference_to_a_twice_declared_name_takes_whichever_matched() =
+    assert_eq(first_match("((?<x>a)|(?<x>b))\\k<x>", "aa"), "aa")
+    assert_eq(first_match("((?<x>a)|(?<x>b))\\k<x>", "bb"), "bb")
+    assert_eq(re("((?<x>a)|(?<x>b))\\k<x>").group_numbers("x").view(), [2, 3])
+
+@test
+a_relative_backreference_behaves_like_a_numbered_one() =
+    assert_eq(first_match("(.)\\k<-1>", "abccd"), "cc")
+
+@test
+a_relative_backreference_matches_a_doubled_word() =
+    val m = find_first("(\\w+)\\s+\\k<-1>", "the the").unwrap()
+
+    assert_eq(m.text(), "the the")
+    assert_eq(m.group(1), Some("the"))
+
+@test
+a_relative_backreference_reaches_across_a_group() =
+    assert_eq(first_match("(a)(b)\\k<-2>", "aba"), "aba")
+    assert(find_first("(a)(b)\\k<-2>", "abb").is_none())
+
+@test
+a_forward_backreference_fails_before_its_group_fires() =
+    assert(find_first("\\k<+1>(\\w+)", "foo").is_none())
+
+@test
+a_forward_backreference_falls_through_to_its_alternative() =
+    val m = find_first("(\\w+) (\\k<+1>|(\\w+))", "the dog").unwrap()
+
+    assert_eq(m.text(), "the dog")
+    assert_eq(m.group(1), Some("the"))
+    assert_eq(m.group(3), Some("dog"))
+
+// **Oniguruma refuses `\N` past the pattern's groups** — every corpus case of the Scala port's
+// "beyond the declared count" section. A TextMate tokenizer replaces such a `\N` in an `end` pattern
+// with the `begin` match's text before it compiles, which `corpus_tests.sysl` does too.
+@test
+corpus_backreferences_beyond_the_count_are_refused() =
+    assert(compile_fail("(\\3)|(\\w+)").contains("invalid backref number"))
+    assert(compile_fail("^\\s*(\\2)(?![A-Za-z0-9_])").contains("invalid backref number"))
+    assert(compile_fail("(\\3)|(?=$|\\*/)").contains("invalid backref number"))
+    assert(compile_fail("\\1abc").contains("invalid backref number"))
+
+// What the tokenizer compiles once it has substituted an empty `begin` group for `\3`: the
+// alternation then fires zero-width at the end, or before `*/`.
+@test
+a_resolved_corpus_backreference_runs() =
+    val r = re("()|(?=$|\\*/)")
+    val m = r.find("abc").expect("ran").unwrap()
+
+    assert_eq(m.start(), 0)
+    assert_eq(m.end(), 0)
+
+    val e = re("(?=$|\\*/)")
+    val at_end = e.find("abc").expect("ran").unwrap()
+    val before = e.find("foo*/bar").expect("ran").unwrap()
+
+    assert_eq(at_end.start(), 3)
+    assert_eq(at_end.end(), 3)
+    assert_eq(before.start(), 3)
+    assert_eq(before.end(), 3)

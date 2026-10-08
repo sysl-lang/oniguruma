@@ -1,0 +1,32 @@
+// Oniguruma regular expressions, bound to the C library.
+//
+// This is the block a *consumer* writes to reach this package:
+//
+//     dependencies {
+//       oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.0" }
+//     }
+//
+// The module a program imports is `sh.sysl.oniguruma`.
+package {
+  name    = "oniguruma"
+  version = "0.1.0"
+
+  // The compiler this was written and tested against.
+  sysl = "0.1.0-alpha.4"
+}
+
+// **`posix`, because Oniguruma is a hosted library**, and **`heap`, because every handle it hands
+// back — a compiled pattern, a region, a set, a search budget — was allocated by it** and is paired
+// with a free on the other side by this package's destructors.
+//
+// **`pkg_config` rather than vendoring.** Vendoring is a claim that the code has to run on a board,
+// and a highlighter never will; Oniguruma is packaged everywhere, so the library is installed and
+// this is where a missing one becomes a sentence rather than a link error.
+requires {
+  heap  = true
+  posix = true
+
+  pkg_config {
+    oniguruma = "Oniguruma — `brew install oniguruma` on macOS, Debian's libonig-dev, Arch's oniguruma"
+  }
+}

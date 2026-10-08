@@ -1,0 +1,68 @@
+module sh.sysl.oniguruma
+@tests
+
+// The Scala port's `MatchPropertySpec`: `\p{…}` and `\P{…}`, alone and inside a class.
+
+@test
+letter_matches_ascii_letters() =
+    assert_eq(first_match("\\p{L}+", "abc123"), "abc")
+
+@test
+letter_matches_non_ascii_letters() =
+    assert_eq(first_match("\\p{L}+", "αβγ123"), "αβγ")
+
+@test
+letter_rejects_digits() =
+    assert(find_first("\\p{L}", "123").is_none())
+
+@test
+letter_rejects_punctuation() =
+    assert(find_first("\\p{L}", ".,!?").is_none())
+
+@test
+number_matches_ascii_digits() =
+    assert_eq(first_match("\\p{N}+", "abc123def"), "123")
+
+@test
+number_matches_a_letter_number() =
+    assert_eq(first_match("\\p{N}", "Ⅰ"), "Ⅰ")
+
+@test
+number_rejects_letters() =
+    assert(find_first("\\p{N}", "abc").is_none())
+
+@test
+mark_matches_a_combining_mark() =
+    val m = find_first("\\p{M}", "e\u{301}").unwrap()
+
+    assert_eq(m.text(), "\u{301}")
+    assert_eq(m.start(), 1)
+    assert_eq(m.end(), 3)
+
+@test
+mark_rejects_ordinary_letters() =
+    assert(find_first("\\p{M}", "abc").is_none())
+
+@test
+print_matches_letters_digits_punctuation_and_space() =
+    assert_eq(first_match("\\p{Print}+", "Hello, world!"), "Hello, world!")
+
+@test
+print_rejects_control_characters() =
+    assert(find_first("\\p{Print}", "\t").is_none())
+
+@test
+print_rejects_newlines() =
+    assert(find_first("\\p{Print}", "\n").is_none())
+
+@test
+a_negated_property_matches_the_rest() =
+    assert_eq(first_match("\\P{L}+", "abc123def"), "123")
+
+@test
+a_property_in_a_class_with_a_literal() =
+    assert_eq(first_match("[\\p{L}_]+", "_foo_bar 123"), "_foo_bar")
+
+@test
+two_properties_in_one_class() =
+    assert_eq(first_match("[\\p{L}\\p{N}]+", "abc123!def"), "abc123")

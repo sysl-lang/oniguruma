@@ -1,0 +1,192 @@
+module sh.sysl.oniguruma
+@tests
+
+import sysl.buf.{Buf, buf}
+import sysl.container.{Set, set}
+import sysl.encoding.base64_decode
+import sysl.fs.read_bytes
+import sysl.text.{Search, from_utf8}
+import sysl.time.{monotonic, whole_millis}
+
+// The Scala port's JVM corpus specs — `CorpusSpec`, `CompileCorpusSpec` and the corpus half of
+// `BashGrammarHangSpec` — over the same two files, carried in `corpus/` beside the package:
+//
+//   - `textmate-corpus.txt`: every `match`, `begin`, `end` and `while` pattern of 36 TextMate
+//     grammars, deduplicated, one base64 line each;
+//   - `bash-grammar-patterns.txt`: the bash grammar's 195 patterns in source order, not deduplicated.
+
+// The corpus directory, found from this file's own place in the tree.
+private corpus_file(name: string) -> string
+    val here = __FILE__
+    val cut = here.last_index_of("/sh/sysl/oniguruma/").expect("this file sits under sh/sysl/oniguruma")
+
+    s"${here[0..<cut]}/corpus/${name}"
+end corpus_file
+
+// One pattern per non-empty line, each line base64 of the pattern's UTF-8.
+load_patterns(name: string) -> Buf[string]
+    val bytes = read_bytes(corpus_file(name)).expect(s"${name} reads")
+    var out: Buf[string] = buf()
+    var line_start: usize = 0
+
+    for i in 0..(bytes.len)
+        if i == bytes.len || bytes[i] == u8('\n')
+            if i > line_start
+                val text = bytes[line_start..<i]
+                var decoded: []u8 = [0; text.len]
+                val n = base64_decode(text, decoded).expect("a corpus line is base64")
+
+                out.push(from_utf8(decoded[0..<n]).expect("a corpus pattern is UTF-8"))
+
+            line_start = i + 1
+
+    out
+end load_patterns
+
+// **What a TextMate tokenizer does to an `end` or `while` pattern before compiling it**: every `\N`
+// names a group of the rule's `begin` match and is replaced by that group's text, escaped.
+// vscode-textmate's `resolveBackReferences` is this, with the text the `begin` happened to match;
+// here every group is taken to have matched nothing, which is the one text every grammar's `begin`
+// can produce.
+resolve_back_references(pattern: string) -> string
+    val b = pattern.bytes
+    var out: Buf[u8] = buf()
+    var i: usize = 0
+
+    while i < b.len
+        if b[i] == u8('\\') && i + 1 < b.len && b[i + 1] >= u8('0') && b[i + 1] <= u8('9')
+            i += 1
+
+            while i < b.len && b[i] >= u8('0') && b[i] <= u8('9')
+                i += 1
+        else
+            out.push(b[i])
+            i += 1
+
+    from_utf8(out.view()).expect("dropping ASCII digits leaves UTF-8")
+end resolve_back_references
+
+@test
+the_corpus_loads() =
+    assert(load_patterns("textmate-corpus.txt").len() > 0)
+
+@test
+the_corpus_holds_3418_patterns() =
+    assert_eq(load_patterns("textmate-corpus.txt").len(), 3418)
+
+@test
+every_corpus_pattern_is_non_empty() =
+    for p in load_patterns("textmate-corpus.txt").view()
+        assert(p.bytes.len > 0)
+
+@test
+the_corpus_is_deduplicated() =
+    val ps = load_patterns("textmate-corpus.txt")
+    val seen: Set[string] = set()
+
+    for p in ps.view()
+        seen.add(p)
+
+    assert_eq(seen.len(), ps.len())
+
+// **Every corpus pattern compiles — 100%, not the port's 95% floor.** The ones Oniguruma refuses as
+// written are exactly the `end` patterns that refer to their `begin`'s groups, and every one of them
+// compiles once the reference is resolved the way a tokenizer resolves it.
+@test
+every_corpus_pattern_compiles() =
+    var as_written: usize = 0
+    var resolved: usize = 0
+
+    for p in load_patterns("textmate-corpus.txt").view()
+        compile(p) match
+            Ok(_) -> as_written += 1
+            Err(e) ->
+                val why = describe(e)
+
+                assert(why.contains("invalid backref number"), s"'${p}' is refused: ${why}")
+
+                compile(resolve_back_references(p)) match
+                    Ok(_) -> resolved += 1
+                    Err(e2) -> panic(s"'${p}' is refused even resolved: ${describe(e2)}")
+
+    assert_eq(as_written + resolved, 3418)
+    assert_eq(resolved, 24)
+end every_corpus_pattern_compiles
+
+// The pattern's own text, cut to 200 bytes on a character boundary, is its smoke subject — the port's
+// choice, which gives every pattern a subject full of the characters it mentions.
+private smoke_subject(p: string) -> string
+    val b = p.bytes
+
+    if b.len <= 200 then return p
+
+    var cut: usize = 200
+
+    while cut > 0 && (b[cut] & 192) == 128
+        cut -= 1
+
+    p[0..<cut]
+end smoke_subject
+
+private compiled(p: string) -> &Regex = compile(p) match
+    Ok(r) -> r
+    Err(_) -> compile(resolve_back_references(p)).expect(s"'${p}' compiles resolved")
+
+// **Every pattern answers, and exactly one runs out of budget doing it** — a Go grammar pattern
+// whose nested `+` loops are exponential against its own text. Oniguruma's default budget stops it
+// at the first position it tries, as vscode-oniguruma's would.
+@test
+every_corpus_pattern_runs_against_its_own_text() =
+    var spent: Buf[string] = buf()
+
+    for p in load_patterns("textmate-corpus.txt").view()
+        compiled(p).find(smoke_subject(p)) match
+            Ok(_) -> ()
+            Err(RetryLimit) -> spent.push(p)
+            Err(e) -> panic(s"'${p}' failed to run: ${describe(e)}")
+
+    assert_eq(spent.len(), 1)
+    assert(spent.at(0).contains("\\bchan\\b"), spent.at(0))
+end every_corpus_pattern_runs_against_its_own_text
+
+// ## No pattern hangs
+
+private bug_inputs() -> [4]string = ["echo \"$HOME\"", "for i in 1 2 3; do echo $i; done", "", "   "]
+
+// The highlighter's call shape — an anchored attempt at every character boundary with `\G` there —
+// timed per pattern, answering every pattern over `most` milliseconds.
+private slow_patterns(patterns: Buf[string], input: string, most: long) -> Buf[string]
+    var slow: Buf[string] = buf()
+    val b = input.bytes
+
+    for p in patterns.view()
+        val r = compiled(p)
+        val t0 = monotonic()
+
+        for pos in 0..(b.len)
+            r.match_at(input, pos, pos).expect(s"'${p}' runs")
+
+        val ms = whole_millis(monotonic() - t0)
+
+        if ms > most then slow.push(s"${ms} ms: ${p}")
+
+    slow
+end slow_patterns
+
+private no_slow(label: string, patterns: Buf[string])
+    for input in bug_inputs()
+        val slow = slow_patterns(patterns, input, 50)
+
+        assert_eq(slow.len(), 0, s"${label} on '${input}': ${if slow.len() > 0 then slow.at(0) else ""}")
+end no_slow
+
+@test
+no_corpus_pattern_hangs_on_the_bug_report_inputs() =
+    no_slow("corpus", load_patterns("textmate-corpus.txt"))
+
+@test
+no_bash_pattern_hangs_on_the_bug_report_inputs() =
+    val ps = load_patterns("bash-grammar-patterns.txt")
+
+    assert_eq(ps.len(), 195)
+    no_slow("bash", ps)
