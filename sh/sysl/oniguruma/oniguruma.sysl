@@ -222,7 +222,7 @@ end Match
 private match_from(s: string, r: *c.Region) -> Match
     val n = usize(r.num_regs)
 
-    var slots: []int = [-1; n * 2]
+    val slots: []int = [-1; n * 2]
 
     for i in 0..<n
         slots[i * 2] = int(r.beg[i])

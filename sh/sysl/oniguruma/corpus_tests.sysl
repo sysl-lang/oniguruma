@@ -33,7 +33,7 @@ load_patterns(name: string) -> Buf[string]
         if i == bytes.len || bytes[i] == u8('\n')
             if i > line_start
                 val text = bytes[line_start..<i]
-                var decoded: []u8 = [0; text.len]
+                val decoded: []u8 = [0; text.len]
                 val n = base64_decode(text, decoded).expect("a corpus line is base64")
 
                 out.push(from_utf8(decoded[0..<n]).expect("a corpus pattern is UTF-8"))
