@@ -2,6 +2,8 @@
 
 Oniguruma regular expressions for sysl — the engine TextMate grammars are written for.
 
+*An independent sysl package for Oniguruma. It is not affiliated with or endorsed by Oniguruma's authors or trademark holders.*
+
 ```
 dependencies {
   oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.0" }
