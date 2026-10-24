@@ -6,7 +6,8 @@ import sysl.container.{Set, set}
 import sysl.encoding.base64_decode
 import sysl.fs.read_bytes
 import sysl.text.{Search, from_utf8}
-import sysl.time.{monotonic, whole_millis}
+import sysl.posix.time.cpu_time
+import sysl.time.whole_millis
 
 // The Scala port's JVM corpus specs — `CorpusSpec`, `CompileCorpusSpec` and the corpus half of
 // `BashGrammarHangSpec` — over the same two files, carried in `corpus/` beside the package:
@@ -154,19 +155,21 @@ end every_corpus_pattern_runs_against_its_own_text
 private bug_inputs() -> [4]string = ["echo \"$HOME\"", "for i in 1 2 3; do echo $i; done", "", "   "]
 
 // The highlighter's call shape — an anchored attempt at every character boundary with `\G` there —
-// timed per pattern, answering every pattern over `most` milliseconds.
+// timed per pattern in processor time -- wall time stretches under a loaded machine, which is how a
+// census running many suites at once failed this test -- answering every pattern over `most`
+// milliseconds of it.
 private slow_patterns(patterns: Buf[string], input: string, most: long) -> Buf[string]
     var slow: Buf[string] = buf()
     val b = input.bytes
 
     for p in patterns.view()
         val r = compiled(p)
-        val t0 = monotonic()
+        val t0 = cpu_time()
 
         for pos in 0..(b.len)
             r.match_at(input, pos, pos).expect(s"'${p}' runs")
 
-        val ms = whole_millis(monotonic() - t0)
+        val ms = whole_millis(cpu_time() - t0)
 
         if ms > most then slow.push(s"${ms} ms: ${p}")
 
@@ -175,7 +178,7 @@ end slow_patterns
 
 private no_slow(label: string, patterns: Buf[string])
     for input in bug_inputs()
-        val slow = slow_patterns(patterns, input, 50)
+        val slow = slow_patterns(patterns, input, 250)
 
         assert_eq(slow.len(), 0, s"${label} on '${input}': ${if slow.len() > 0 then slow.at(0) else ""}")
 end no_slow
