@@ -31,7 +31,7 @@ main() -> Result[unit, string]
 The module is `sh.sysl.oniguruma`. Oniguruma is **installed, not vendored** — `brew install
 oniguruma`, Debian's `libonig-dev`, Arch's `oniguruma` — and found through `pkg-config`. Vendoring
 in this organisation is a claim that the code runs on a board, and a highlighter never will. Built and
-tested against Oniguruma 6.9.10 and sysl 0.1.0-alpha.4.
+tested against Oniguruma 6.9.10 and sysl 0.6.0.
 
 ## The API
 
