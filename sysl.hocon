@@ -3,16 +3,16 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.2" }
+//       oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.3" }
 //     }
 //
 // The module a program imports is `sh.sysl.oniguruma`.
 package {
   name    = "oniguruma"
-  version = "0.1.2"
+  version = "0.1.3"
 
   // The compiler this was written and tested against.
-  sysl = "0.1.0-alpha.8"
+  sysl = "0.6.0"
 }
 
 // **`posix`, because Oniguruma is a hosted library**, and **`heap`, because every handle it hands

@@ -1,6 +1,7 @@
 module sh.sysl.oniguruma
 
 import sh.sysl.oniguruma.c
+import sysl.raw.ptr_cast
 import sysl.slices.{as_mut_ptr, as_ptr}
 import sysl.text.{from_utf8, from_utf8_lossy, is_char_boundary}
 import sysl.buf.{Buf, buf}
