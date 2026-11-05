@@ -263,9 +263,9 @@ find_all_returns_every_non_overlapping_match() =
     val ms = re("\\d+").find_all("a1b22c333").expect("ran")
 
     assert_eq(ms.len(), 3)
-    assert_eq(ms.at(0).text(), "1")
-    assert_eq(ms.at(1).text(), "22")
-    assert_eq(ms.at(2).text(), "333")
+    assert_eq(ms[0].text(), "1")
+    assert_eq(ms[1].text(), "22")
+    assert_eq(ms[2].text(), "333")
 
 @test
 find_all_with_no_matches_is_empty() =

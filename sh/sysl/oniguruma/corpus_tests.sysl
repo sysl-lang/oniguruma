@@ -147,7 +147,7 @@ every_corpus_pattern_runs_against_its_own_text() =
             Err(e) -> panic(s"'${p}' failed to run: ${describe(e)}")
 
     assert_eq(spent.len(), 1)
-    assert(spent.at(0).contains("\\bchan\\b"), spent.at(0))
+    assert(spent[0].contains("\\bchan\\b"), spent[0])
 end every_corpus_pattern_runs_against_its_own_text
 
 // ## No pattern hangs
@@ -180,7 +180,7 @@ private no_slow(label: string, patterns: Buf[string])
     for input in bug_inputs()
         val slow = slow_patterns(patterns, input, 250)
 
-        assert_eq(slow.len(), 0, s"${label} on '${input}': ${if slow.len() > 0 then slow.at(0) else ""}")
+        assert_eq(slow.len(), 0, s"${label} on '${input}': ${if slow.len() > 0 then slow[0] else ""}")
 end no_slow
 
 @test

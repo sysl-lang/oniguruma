@@ -69,14 +69,14 @@ find_all_threads_g_from_match_to_match() =
     val ms = re("\\Ga").find_all("aab").expect("ran")
 
     assert_eq(ms.len(), 2)
-    assert_eq(ms.at(1).start(), 1)
+    assert_eq(ms[1].start(), 1)
 
 @test
 find_all_steps_over_a_whole_character_after_an_empty_match() =
     val ms = re("").find_all("é").expect("ran")
 
     assert_eq(ms.len(), 2)
-    assert_eq(ms.at(1).start(), 2)
+    assert_eq(ms[1].start(), 2)
 
 @test
 the_empty_subject_is_searched() =

@@ -98,4 +98,4 @@ find_all_on_nested_stars() =
     val ms = r.find_all("aaa").expect("ran")
 
     assert(ms.len() > 0 && ms.len() < 100)
-    assert_eq(ms.at(0).text(), "aaa")
+    assert_eq(ms[0].text(), "aaa")
