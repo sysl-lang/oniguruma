@@ -473,7 +473,7 @@ struct Scanner
         val at = boundary_from(b, start)
         var pos: i32 = 0
 
-        val rc = c.regset_search_with_param(self.set, sub.lo, sub.hi, sub.at(at), sub.hi, c.REGSET_POSITION_LEAD, anchor_bits(at, anchor), as_mut_ptr(self.params.view()), &pos)
+        val rc = c.regset_search_with_param(self.set, sub.lo, sub.hi, sub.at(at), sub.hi, c.REGSET_POSITION_LEAD, anchor_bits(at, anchor), as_mut_ptr(self.params.view_mut()), &pos)
 
         if rc == c.MISMATCH then return Ok(None)
 
@@ -525,7 +525,7 @@ scanner_with(patterns: []const string, o: Options, limits: Limits) -> Result[&Sc
         if mp == null then short = true else params.push(mp)
 
     var set: *c.RegSet = null
-    val rc = if short then c.ERR_MEMORY else c.regset_new(&set, i32(regs.len()), as_mut_ptr(regs.view()))
+    val rc = if short then c.ERR_MEMORY else c.regset_new(&set, i32(regs.len()), as_mut_ptr(regs.view_mut()))
 
     if rc != c.NORMAL
         for r in regs.view()
