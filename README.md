@@ -6,7 +6,7 @@ Oniguruma regular expressions for sysl — the engine TextMate grammars are writ
 
 ```
 dependencies {
-  oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.4" }
+  oniguruma { git = "github.com/sysl-lang/oniguruma", version = "0.1.5" }
 }
 ```
 
